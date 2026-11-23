@@ -16,21 +16,21 @@ function Get-SetupAssignment([string]$Name){
 }
 $transaction=Get-SetupAssignment operations
 $allowed=@('Add-Member','Assert-GuardReleaseClosed','Assert-GuardReleaseOwnedPath','Confirm-GuardDailySandboxieApp','ConvertFrom-Json',
-    'ConvertTo-Json','Enter-GuardReleaseFirewallLock','Exit-GuardReleaseFirewallLock','Export-ScheduledTask','ForEach-Object','Get-ChildItem',
+    'ConvertTo-Json','Enter-GuardReleaseFirewallLock','Exit-GuardReleaseFirewallLock','Export-ScheduledTask','Find-GuardPriorBettboxRoute','ForEach-Object','Get-ChildItem',
     'Get-GuardDailyNotifierTaskSnapshot','Get-GuardDailyServiceSids','Get-GuardInventory','Get-GuardIsolationMode','Get-GuardNetworkAdapters',
-    'Get-GuardNodeProfileRoute','Get-GuardReleaseAsset','Get-GuardReleaseCanonicalIpv4','Get-GuardReleaseControllerTask','Get-GuardReleaseGeneration',
+    'Get-GuardNodeProfileRoute','Get-GuardNodeStorePath','Get-GuardReleaseAsset','Get-GuardReleaseCanonicalIpv4','Get-GuardReleaseControllerTask','Get-GuardReleaseGeneration',
     'Get-GuardSandboxieApp','Get-GuardVpnAdapter','Get-NetTCPConnection','Get-Service','Initialize-GuardAdministratorDirectory',
     'Install-GuardDailyNotifierTask','Install-GuardReleaseDriver','Join-Path','New-GuardReleasePolicy','Open-GuardReleaseLaunchLock',
     'Read-GuardDailyDesktopImages','Read-GuardDailyRecord','Read-GuardDailyRelayConfig','Register-GuardReleaseController','Release-GuardReleaseLaunchLock',
     'Remove-GuardReleaseDriver','Remove-GuardReleaseProfile','Resolve-Path','Restore-GuardDailyNotifierTask','Save-GuardAdministratorJson',
     'Save-GuardReleaseJournal','Save-GuardReleasePolicyIdentity','Save-GuardReleaseReceipt','Send-GuardReleaseProgress',
-    'Set-GuardReleaseAsset','Set-GuardReleaseControllerAction','Split-Path','Start-GuardReleaseRollbackRunner',
+    'Set-GuardReleaseAsset','Set-GuardReleaseControllerAction','Set-GuardReleaseLocaleFailure','Split-Path','Start-GuardReleaseRollbackRunner',
     'Start-GuardReleaseController','Start-ScheduledTask','Stop-GuardReleaseController','Stop-GuardReleaseOwnedRelay','Stop-ScheduledTask',
-    'Test-GuardDailyDesktopImages','Test-GuardDailyPolicyBinding','Test-GuardDailyScopeBinding','Test-GuardReleaseIdle','Test-GuardReleaseSandboxie',
+    'Test-GuardDailyDesktopImages','Test-GuardDailyPolicyBinding','Test-GuardDailyScopeBinding','Test-GuardNodeStoreItem','Test-GuardReleaseIdle','Test-GuardReleaseSandboxie',
     'Test-Path','Undo-GuardDailyStoreStage','Unregister-ScheduledTask','Wait-GuardDailyNotifierTaskStopped','Wait-GuardReleaseReady','Where-Object')
 foreach($command in $transaction.FindAll({param($node) $node -is [Management.Automation.Language.CommandAst]},$true)){
     if($command.GetCommandName() -in $allowed -or
-        $command.Extent.Text -cin '& $NodeOperations.Apply $NodeProfile','& $NodeOperations.Snapshot'){continue}
+        $command.Extent.Text -cin '& $NodeOperations.Apply $NodeProfile $persistLocale','& $NodeOperations.Snapshot','& $NodeOperations.Verify'){continue}
     throw 'Review the installer transaction command before running this isolated test.'
 }
 $allowedStatic=@('[ClaudeGuard.Network.WindowsPolicySession]::InstallPersistent','[ClaudeGuard.Network.WindowsPolicySession]::ReadBootFilterCount',
@@ -47,7 +47,7 @@ $operationSource=$transaction.Extent.Text.Replace($windowsPath,'$fixtureWindows'
 $initialState=(Get-SetupAssignment state).Extent.Text
 $initialResult=(Get-SetupAssignment result).Extent.Text
 $safeFunctions=@('Save-GuardReleaseReceipt','Save-GuardReleaseJournal','New-GuardReleasePolicy','Assert-GuardReleaseClosed',
-    'Remove-GuardReleaseProfile','Save-GuardReleasePolicyIdentity','Read-GuardReleaseRecoveryJson','Read-GuardReleaseRecoveryPolicy',
+    'Remove-GuardReleaseProfile','Set-GuardReleaseLocaleFailure','Save-GuardReleasePolicyIdentity','Read-GuardReleaseRecoveryJson','Read-GuardReleaseRecoveryPolicy',
     'Initialize-GuardReleaseRecovery')
 foreach($name in $safeFunctions){
     $definition=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name},$false)
@@ -63,13 +63,14 @@ namespace ClaudeGuard.Network {
     public sealed class IntegrationPolicy {
         public Guid PersistentSublayer { get; private set; }
         public int BootCount { get { return 2; } }
-        public IntegrationPolicy(Guid id) { PersistentSublayer = id; }
+        private readonly string endpoint;
+        public IntegrationPolicy(Guid id, string endpoint) { PersistentSublayer = id; this.endpoint = endpoint; }
         public IntegrationPolicy WithRegisteredPackageAdmission(string[] images) {
             if (images.Length != 1) throw new InvalidOperationException("Incorrect fixture image inventory");
             return this;
         }
         public string[] GetBaselineKeys() { return new[] { PersistentSublayer.ToString("D") }; }
-        public string[] GetBootKeys() { return new[] { PersistentSublayer.ToString("D"), "Fixture" }; }
+        public string[] GetBootKeys() { return new[] { PersistentSublayer.ToString("D"), endpoint }; }
     }
     public static class WindowsPolicySession {
         public static readonly Dictionary<Guid, ushort> Closed = new Dictionary<Guid, ushort>();
@@ -120,10 +121,10 @@ function Get-Acl([string]$LiteralPath){
     $item
 }
 function Set-Acl([string]$LiteralPath,$AclObject){Assert-SetupFixturePath $LiteralPath}
-function Test-Path([string]$LiteralPath){
+function Test-Path([string]$LiteralPath,[string]$PathType='Any'){
     if($LiteralPath.StartsWith('HKLM:\',[StringComparison]::OrdinalIgnoreCase)){return $false}
     Assert-SetupFixturePath $LiteralPath
-    Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath
+    Microsoft.PowerShell.Management\Test-Path -LiteralPath $LiteralPath -PathType $PathType
 }
 function Initialize-GuardAdministratorDirectory([string]$Path){Assert-SetupFixturePath $Path; $null=[IO.Directory]::CreateDirectory($Path)}
 function Save-GuardAdministratorJson([string]$Path,$Data){
@@ -136,7 +137,24 @@ function Save-GuardAdministratorJson([string]$Path,$Data){
     [IO.File]::WriteAllText($Path,($Data | ConvertTo-Json -Depth 12 -Compress),[Text.UTF8Encoding]::new($false))
 }
 function Read-GuardDailyRecord([string]$Name){Read-GuardDailyJsonFile (Join-Path $root $Name)}
-function Read-GuardDailyRelayConfig([int]$Port){if($model.Profile){Get-GuardNodeProfileRoute $model.Profile $Port}else{Get-GuardNodeProfileRoute $baselineProfile $Port}}
+function Read-GuardDailyRelayConfig([int]$Port){
+    if($model.Profile){return Get-GuardNodeProfileRoute $model.Profile $Port}
+    if($model.LegacyReadThrows){throw 'Injected unsupported current Bettbox selection'}
+    $selection=if($model.LegacySelection){$model.LegacySelection}else{$baselineProfile}
+    Get-GuardNodeProfileRoute $selection $Port
+}
+function Find-GuardPriorBettboxRoute([string]$ExpectedHash,[int]$Port){
+    $model.PriorSearches++
+    if($ExpectedHash -cne (Read-GuardDailyRecord 'daily-provisioned.json').RouteHash -or $Port -ne 18793){
+        throw 'The fixture search was not pinned to the approved relay.'
+    }
+    $model.SavedPriorRoute
+}
+function Get-GuardNodeStorePath {Join-Path $root 'node-private\selected-node.json'}
+function Test-GuardNodeStoreItem([string]$Path,[switch]$Directory){
+    Assert-SetupFixturePath $Path
+    [bool]($model.Profile -or $model.ManualStorePresent)
+}
 function Get-GuardSandboxieApp {$fixtureApp}
 function Get-GuardInventory([switch]$LocalOnly){[pscustomobject]@{Programs=@($fixtureApp.DesktopPath);DesktopPaths=@($fixtureApp.DesktopPath);Packages=@(@{Sid=$fixtureApp.PackageSid})}}
 function Get-GuardDailyServiceSids {}
@@ -150,10 +168,12 @@ function Test-GuardReleaseIdle {-not $model.DesktopRunning}
 function Test-GuardDailyScopeBinding($Record){$Record.ScopeSid -ceq $fixtureApp.PackageSid}
 function Confirm-GuardDailySandboxieApp($Record,$App){if($Record.PackageFullName -cne $fixtureApp.PackageFullName){throw 'Unexpected fixture package'}}
 function Test-GuardDailyPolicyBinding($Record,$Policy){([string]$Record.Sublayer -eq [string]$Policy.PersistentSublayer) -and
+    (($Record.BaselineKeys -join '|') -ceq ($Policy.GetBaselineKeys() -join '|')) -and
     (($Record.BootKeys -join '|') -ceq ($Policy.GetBootKeys() -join '|'))}
 function New-GuardInstalledPolicy($Route,[int]$Port,[guid]$Deployment,$Inventory,$ScopeSid,$Containment){
-    if(-not $Route.Upstream.server -or $ScopeSid -cne $fixtureApp.PackageSid){throw 'Missing scoped fixture endpoint'}
-    [ClaudeGuard.Network.IntegrationPolicy]::new($Deployment)
+    if(-not $Route.Upstream.server -or $ScopeSid -cne $fixtureApp.PackageSid -or
+        $fixtureApp.DesktopPath -notin @($Inventory.Programs)){throw 'Missing scoped fixture endpoint or inventory'}
+    [ClaudeGuard.Network.IntegrationPolicy]::new($Deployment,('{0}|{1}' -f $Route.Upstream.server,$Route.Upstream.port))
 }
 function Open-GuardReleaseLaunchLock {$model.LaunchHeld=$true}
 function Release-GuardReleaseLaunchLock {$model.LaunchHeld=$false}
@@ -173,7 +193,11 @@ function Register-GuardReleaseController {
 function Start-GuardReleaseRollbackRunner {$model.RollbackAnchored=$true}
 function Send-GuardReleaseProgress($Phase,$Details){$model.ProgressPhase=$Phase}
 function Stop-GuardReleaseController {$model.ControllerRunning=$false}
-function Start-GuardReleaseController {if(-not $model.Controller -or $model.LaunchHeld){throw 'Controller cannot start'}; $model.ControllerRunning=$true}
+function Start-GuardReleaseController {
+    if(-not $model.Controller -or $model.LaunchHeld){throw 'Controller cannot start'}
+    $model.Starts++
+    $model.ControllerRunning=$true
+}
 function Stop-GuardReleaseOwnedRelay {}
 function Export-ScheduledTask {'<OwnedFixtureTask/>'}
 function Unregister-ScheduledTask {$model.Controller=$false;$model.ControllerRunning=$false}
@@ -194,6 +218,7 @@ function Remove-GuardReleaseDriver($Driver){Assert-SetupFixturePath $Driver;$mod
 function Test-GuardReleaseSandboxie($Record){if(-not $model.Driver -or -not [IO.File]::Exists((Join-Path $driverRoot 'Sandboxie.ini'))){throw 'Fixture driver readback failed'}}
 function Undo-GuardDailyStoreStage {Assert-SetupFixturePath $root;[IO.File]::Delete((Join-Path $root 'daily-store-stage.json'))}
 function Wait-GuardReleaseReady($Record,[datetime]$Since,[int]$RequiredProofs,[switch]$RequireStoreWorker,$Diagnostics,$Progress){
+    if($RequiredProofs -eq 2){$model.OldReadinessChecks++}
     if(-not $model.ControllerRunning -or $model.FirewallHeld -or -not $model.Driver -or
         -not [ClaudeGuard.Network.WindowsPolicySession]::Closed.ContainsKey([guid]$Record.Sublayer) -or
         (Read-GuardDailyRelayConfig $Record.Port).Hash -cne $Record.RouteHash){throw 'Fixture readiness dependencies did not verify'}
@@ -210,16 +235,51 @@ function New-SetupTestNode([string]$Server){
         ServerName='fixture.test';RealityPublicKey=('A'*43);RealityShortId='';ClientFingerprint='chrome'}
 }
 
-function Invoke-SetupTestTransaction([switch]$RouteOnly,[pscredential]$NodeProfile,[switch]$Recovery){
+function Invoke-SetupTestTransaction([switch]$RouteOnly,[pscredential]$NodeProfile,[switch]$Recovery,[switch]$StopAfterBackup,
+    [string]$RequirePriorGeneration,[switch]$VerifyLocale){
     . ([scriptblock]::Create($initialState))
     . ([scriptblock]::Create($initialResult))
     . ([scriptblock]::Create($operationSource))
     $NodeOperations=@{
-        Snapshot={@{HadProfile=[bool]$model.Profile;Protected=if($model.Profile){ConvertFrom-SecureString -SecureString $model.Profile.Password}}}
-        Apply={param($profile) $model.Profile=$profile}
+        Snapshot={[pscustomobject]@{
+            Node=[pscustomobject]@{Exists=[bool]$model.Profile;Protected=if($model.Profile){ConvertFrom-SecureString -SecureString $model.Profile.Password}}
+            Version=2; Region=$model.Region;WindowsLocale=$model.WindowsLocale;BrowserLocale=$model.BrowserLocale
+        }}
+        Apply={param($profile,$persistLocale)
+            $snapshot=Read-GuardReleaseRecoveryJson (Join-Path $backup 'node-snapshot.json')
+            if($snapshot.WindowsLocale -cne $model.WindowsLocale -or $snapshot.BrowserLocale -cne $model.BrowserLocale){
+                throw 'Fixture locale settings were not journaled before the first write'
+            }
+            $model.Profile=$profile; $model.Region='Fixture candidate zone'
+            if($VerifyLocale){
+                Add-Member -InputObject $state.Profile -NotePropertyName 'WindowsPendingWrite' -NotePropertyValue 'RegionalFormat'
+                & $persistLocale $state.Profile
+                if((Read-GuardReleaseRecoveryJson (Join-Path $backup 'node-snapshot.json')).WindowsPendingWrite -cne 'RegionalFormat'){
+                    throw 'The protected transaction did not persist a before-write marker'
+                }
+                $model.WindowsLocale='ja-JP';$model.BrowserLocale='ja,en-US,en'
+                $state.Profile.WindowsPendingWrite=$null
+                & $persistLocale $state.Profile
+            }
+        }
         Restore={param($snapshot)
             if($model.FailRestore){throw 'Injected profile rollback failure'}
-            $model.Profile=if($snapshot.HadProfile){[pscredential]::new('GuardNodeProfile',(ConvertTo-SecureString $snapshot.Protected))}
+            $model.Profile=if($snapshot.Node.Exists){[pscredential]::new('GuardNodeProfile',(ConvertTo-SecureString $snapshot.Node.Protected))}
+            $model.Region=$snapshot.Region;$model.WindowsLocale=$snapshot.WindowsLocale;$model.BrowserLocale=$snapshot.BrowserLocale
+        }
+    }
+    if($VerifyLocale){
+        $NodeOperations.Verify={
+            if(-not [IO.File]::Exists($journalFile) -or $result.FreshProofs -ne 6 -or
+                $model.WindowsLocale -cne 'ja-JP' -or $model.BrowserLocale -cne 'ja,en-US,en'){
+                throw 'The fixture verified locale outside the protected verification phase'
+            }
+            if($model.FailSiteLanguage){
+                $failure=[InvalidOperationException]::new('Synthetic private path C:\private\fixture-browser-data\Preferences')
+                $failure.Data['GuardLocaleFailure']='EdgeSiteMismatch'
+                throw $failure
+            }
+            [pscustomobject]@{SiteAcceptLanguage='ja,en-US;q=0.9,en;q=0.8'}
         }
     }
     $model.LaunchHeld=$true
@@ -234,6 +294,10 @@ function Invoke-SetupTestTransaction([switch]$RouteOnly,[pscredential]$NodeProfi
             & $operations.Restore
             $result.Restored=$true
             $result.Phase='RolledBack'
+        }elseif($StopAfterBackup){
+            & $operations.Preflight
+            $result.Phase='Backup'
+            & $operations.Backup
         }else{Invoke-GuardReleaseChange $operations $result}
         [pscustomobject]$result
     }finally{$model.LaunchHeld=$false;$model.FirewallHeld=$false}
@@ -265,8 +329,9 @@ try{
     $shell=Join-Path $fixtureWindows 'powershell.exe'
     $backgroundControllerArguments='--background-controller'
     $legacyControllerAction=[pscustomobject]@{Execute=$shell;Arguments='fixture legacy action';WorkingDirectory=$null}
-    $model=@{Profile=$null;Driver=$false;Controller=$false;ControllerRunning=$false;Notifier=$false;NotifierRunning=$false}
-    $fixtureApp=[pscustomobject]@{PackageFullName='GuardMsixFixture.11111111111141118111111111111111_2.0.0.0_x64__1111111111111'
+    $model=@{Profile=$null;Driver=$false;Controller=$false;ControllerRunning=$false;Notifier=$false;NotifierRunning=$false
+        Region='Fixture original zone';WindowsLocale='en-US';BrowserLocale='en-US,en';PriorSearches=0;Starts=0;OldReadinessChecks=0}
+    $fixtureApp=[pscustomobject]@{PackageFullName='GuardMsixFixture.9e866f72bae947b08f86410f529dd2d1_2.0.0.0_x64__8689sk8k9f0by'
         Root=(Join-Path $fixtureRoot 'store-fixture');PackageSid='S-1-15-2-111-222-333-444-555-666-777';AppId='Desktop'}
     $fixtureApp | Add-Member NoteProperty DesktopPath (Join-Path $fixtureApp.Root 'fixture-desktop.exe')
     $baselineProfile=New-SetupTestNode '203.0.113.41'
@@ -345,11 +410,15 @@ try{
     Assert-Setup ($pending.Phase -ceq 'RollbackIncomplete' -and [IO.File]::Exists($journalFile)) 'Incomplete rollback retains its recovery journal.'
     $rejected=Invoke-SetupTestTransaction -RouteOnly -NodeProfile $nextProfile
     Assert-Setup ($rejected.Phase -ceq 'Rejected' -and [IO.File]::Exists($journalFile)) 'A second install is rejected before touching a pending transaction.'
+    $oldJournal=Read-GuardReleaseRecoveryJson $journalFile
+    $oldJournal.Version=1
+    $oldJournal.PSObject.Properties.Remove('PriorRouteUnavailable')
+    Save-GuardAdministratorJson $journalFile $oldJournal
     $model.FailRestore=$false
     $recovered=Invoke-SetupTestTransaction -Recovery
     Assert-Setup ($recovered.Restored -and (Read-GuardDailyRecord 'daily-provisioned.json').Generation -ceq $nodeRecord.Generation -and
         $model.ControllerRunning -and [ClaudeGuard.Network.WindowsPolicySession]::Closed.Count -eq 1 -and
-        -not [IO.File]::Exists($journalFile)) 'Recovery reconstructs both policies from the protected journal and completes the interrupted rollback.'
+        -not [IO.File]::Exists($journalFile)) 'Recovery still accepts a prior journal without the new flag and reopens the verified prior route.'
 
     $model.FailReady=$false
     $retry=Invoke-SetupTestTransaction -RouteOnly -NodeProfile $thirdProfile
@@ -362,6 +431,118 @@ try{
     Assert-Setup ($model.CompletionSawJournal -and -not $receiptFailure.Installed -and $receiptFailure.Restored -and
         (Read-GuardDailyRecord 'daily-provisioned.json').Generation -ceq $committed.Generation -and $model.ControllerRunning -and
         -not [IO.File]::Exists($journalFile)) 'The durable rollback journal is still present if writing the final success receipt fails.'
+
+    $model.FailCompletion=$false
+    $model.FailSiteLanguage=$true
+    $siteFailure=Invoke-SetupTestTransaction -RouteOnly -NodeProfile $nextProfile -VerifyLocale
+    Assert-Setup (-not $siteFailure.Installed -and $siteFailure.Restored -and $siteFailure.FailedPhase -ceq 'Verify' -and
+        $siteFailure.Error -ceq 'Edge website language settings did not pass final readback.' -and
+        $siteFailure.LocaleFailure -ceq 'EdgeSiteMismatch' -and -not $siteFailure.SiteAcceptLanguage -and
+        $siteFailure.Error -notmatch 'private|Preferences' -and
+        $model.WindowsLocale -ceq 'en-US' -and $model.BrowserLocale -ceq 'en-US,en' -and -not [IO.File]::Exists($journalFile)) `
+        'A real site readback failure prevents commit and restores the prior Windows and Edge settings.'
+    $model.FailSiteLanguage=$false
+    $verifiedLocale=Invoke-SetupTestTransaction -RouteOnly -NodeProfile $thirdProfile -VerifyLocale
+    Assert-Setup ($verifiedLocale.Installed -and $verifiedLocale.SiteAcceptLanguage -ceq 'ja,en-US;q=0.9,en;q=0.8' -and
+        $model.WindowsLocale -ceq 'ja-JP' -and $model.BrowserLocale -ceq 'ja,en-US,en' -and -not [IO.File]::Exists($journalFile)) `
+        'The verified website header is included only after its protected acceptance succeeds.'
+
+    $legacyRecord=Read-GuardDailyRecord 'daily-provisioned.json'
+    $legacyRecord.PSObject.Properties.Remove('ProxyMode')
+    $legacyRecord.PSObject.Properties.Remove('PolicyInventory')
+    Save-GuardAdministratorJson $provisioned $legacyRecord
+    $legacyBytes=[IO.File]::ReadAllText($provisioned)
+    $legacyZone='Fixture original zone'
+    $model.Region=$legacyZone
+    $model.Profile=$null
+    $model.ControllerAction=$legacyControllerAction
+    $model.RollbackAnchored=$false
+    $model.LegacyReadThrows=$true
+    $oldRoute=Get-GuardNodeProfileRoute $thirdProfile $legacyRecord.Port
+    $jpProfile=New-GuardNodeProfile -Fields @{
+        Transport='WebSocketTls';ServerIpv4='203.0.113.44';ServerPort=443
+        Uuid='00000000-0000-4000-8000-000000000010';ServerName='jp.fixture.test'
+        WebSocketHost='edge.fixture.test';WebSocketPath='/jp'
+    }
+    $jpRoute=Get-GuardNodeProfileRoute $jpProfile $legacyRecord.Port
+    $assets=@(Get-SetupFixtureRelease 4)
+    $health=Join-Path $root 'daily-health.json'
+    [IO.File]::WriteAllText($health,'stale fixture health')
+    $starts=$model.Starts
+    $readinessChecks=$model.OldReadinessChecks
+
+    $model.SavedPriorRoute=$oldRoute
+    $unprobed=Invoke-SetupTestTransaction
+    $stalePreview=Invoke-SetupTestTransaction -NodeProfile $jpProfile -RequirePriorGeneration ('F'*64)
+    $model.ManualStorePresent=$true
+    $unreadableManual=Invoke-SetupTestTransaction -NodeProfile $jpProfile
+    $model.ManualStorePresent=$false
+    Assert-Setup ($unprobed.Phase -ceq 'Rejected' -and $stalePreview.Phase -ceq 'Rejected' -and
+        $unreadableManual.Phase -ceq 'Rejected' -and $model.PriorSearches -eq 0 -and $model.ControllerRunning -and
+        -not [IO.File]::Exists($journalFile) -and [IO.File]::ReadAllText($provisioned) -ceq $legacyBytes) `
+        'Migration rejects missing explicit node, stale installed generation and an unreadable existing manual store before searching.'
+
+    $model.SavedPriorRoute=$jpRoute
+    $unrelated=Invoke-SetupTestTransaction -NodeProfile $jpProfile -RequirePriorGeneration $legacyRecord.Generation
+    $model.SavedPriorRoute=[pscustomobject]@{Hash=$oldRoute.Hash;Upstream=$jpRoute.Upstream}
+    $differentRules=Invoke-SetupTestTransaction -NodeProfile $jpProfile -RequirePriorGeneration $legacyRecord.Generation
+    Assert-Setup ($unrelated.Phase -ceq 'Rejected' -and $differentRules.Phase -ceq 'Rejected' -and $model.PriorSearches -eq 2 -and
+        $model.ControllerRunning -and $model.Starts -eq $starts -and -not [IO.File]::Exists($journalFile) -and
+        [IO.File]::ReadAllText($provisioned) -ceq $legacyBytes) `
+        'Migration requires the exact approved old route hash and persistent firewall keys before writing a journal.'
+
+    $model.SavedPriorRoute=$oldRoute
+    $null=Invoke-SetupTestTransaction -NodeProfile $jpProfile -StopAfterBackup -RequirePriorGeneration $legacyRecord.Generation
+    $earlyJournal=Read-GuardReleaseRecoveryJson $journalFile
+    Assert-Setup ($earlyJournal.PriorRouteUnavailable -eq $true -and -not $earlyJournal.ControllerStopped -and
+        $model.ControllerRunning -and [IO.File]::Exists($health)) 'The backup records closed rollback before touching the old controller.'
+    $earlyRecovery=Invoke-SetupTestTransaction -Recovery
+    Assert-Setup ($earlyRecovery.Restored -and $earlyRecovery.RestoredClosed -and -not $model.ControllerRunning -and
+        $model.Starts -eq $starts -and $model.OldReadinessChecks -eq $readinessChecks -and
+        [IO.File]::ReadAllText($provisioned) -ceq $legacyBytes -and -not [IO.File]::Exists($health) -and
+        -not [IO.File]::Exists($journalFile) -and [ClaudeGuard.Network.WindowsPolicySession]::Closed.Count -eq 1) `
+        'Recovery before the close step disables the old controller, removes stale readiness and verifies the exact closed rules.'
+
+    $model.LegacyReadThrows=$false
+    $model.LegacySelection=$jpProfile
+    $model.FailReady=$true
+    [IO.File]::WriteAllText($health,'stale fixture health')
+    $failedMigration=Invoke-SetupTestTransaction -NodeProfile $jpProfile -RequirePriorGeneration $legacyRecord.Generation
+    Assert-Setup ($failedMigration.Restored -and $failedMigration.RestoredClosed -and $failedMigration.FailedPhase -ceq 'Verify' -and
+        $failedMigration.RestoreVerification.Status -ceq 'Closed' -and $failedMigration.RestoreVerification.BootRules -eq 2 -and
+        $model.ControllerAction.Execute -ieq $shell -and -not $model.ControllerRunning -and -not $model.RollbackAnchored -and
+        $model.Starts -eq ($starts+1) -and $model.OldReadinessChecks -eq $readinessChecks -and
+        -not $model.Profile -and $model.Region -ceq $legacyZone -and (Get-FileHash -LiteralPath $relay).Hash -ceq $newRelayHash -and
+        [IO.File]::ReadAllText($provisioned) -ceq $legacyBytes -and -not [IO.File]::Exists($health) -and
+        -not [IO.File]::Exists($journalFile) -and [ClaudeGuard.Network.WindowsPolicySession]::Closed.Count -eq 1 -and
+        [ClaudeGuard.Network.WindowsPolicySession]::Closed.ContainsKey([guid]$legacyRecord.Sublayer)) `
+        'A different current Bettbox hash allows migration, and failed readiness restores node absence, time zone, files and exact old rules with the gate closed.'
+
+    $model.FailRestore=$true
+    [IO.File]::WriteAllText($health,'stale fixture health')
+    $incompleteMigration=Invoke-SetupTestTransaction -NodeProfile $jpProfile -RequirePriorGeneration $legacyRecord.Generation
+    Assert-Setup ($incompleteMigration.Phase -ceq 'RollbackIncomplete' -and -not $incompleteMigration.RestoredClosed -and
+        -not $model.ControllerRunning -and (Read-GuardReleaseRecoveryJson $journalFile).PriorRouteUnavailable -eq $true) `
+        'A restoration failure keeps the closed rollback journal for another process.'
+    $model.FailRestore=$false
+    $resumedMigration=Invoke-SetupTestTransaction -Recovery
+    Assert-Setup ($resumedMigration.Restored -and $resumedMigration.RestoredClosed -and -not $model.ControllerRunning -and
+        $model.Starts -eq ($starts+2) -and $model.OldReadinessChecks -eq $readinessChecks -and
+        -not $model.Profile -and $model.Region -ceq $legacyZone -and [IO.File]::ReadAllText($provisioned) -ceq $legacyBytes -and
+        -not [IO.File]::Exists($health) -and -not [IO.File]::Exists($journalFile)) `
+        'Resuming a legacy rollback restores the original snapshot and keeps the old route closed.'
+
+    $model.LegacyReadThrows=$true
+    $model.FailReady=$false
+    $migration=Invoke-SetupTestTransaction -NodeProfile $jpProfile -RequirePriorGeneration $legacyRecord.Generation
+    $jpRecord=Read-GuardDailyRecord 'daily-provisioned.json'
+    Assert-Setup ($migration.Installed -and $migration.FreshProofs -eq 6 -and -not $migration.RestoredClosed -and
+        $model.ControllerRunning -and $model.ControllerAction.Execute -ieq $bootstrap -and $model.Region -ceq 'Fixture candidate zone' -and
+        $jpRecord.ProxyMode -ceq 'Manual' -and $jpRecord.RouteHash -ceq $jpRoute.Hash -and
+        (Read-GuardDailyRelayConfig $jpRecord.Port).Hash -ceq $jpRoute.Hash -and -not [IO.File]::Exists($journalFile) -and
+        [ClaudeGuard.Network.WindowsPolicySession]::Closed.Count -eq 1 -and
+        [ClaudeGuard.Network.WindowsPolicySession]::Closed.ContainsKey([guid]$jpRecord.Sublayer)) `
+        'An unsupported current legacy selection can migrate to a verified WebSocket TLS node and commit its exact route and firewall policy.'
 }finally{
     $folder=Get-Item -LiteralPath $fixtureRoot -Force
     if($folder.Parent.FullName.TrimEnd('\') -ine $base -or $folder.Name -cnotmatch '^guard-setup-tests-[a-f0-9]{32}$' -or

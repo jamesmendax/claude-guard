@@ -280,8 +280,10 @@
           <Grid.ColumnDefinitions><ColumnDefinition Width="1.48*" /><ColumnDefinition Width="18" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
           <Border Style="{StaticResource Panel}" Padding="21,18" VerticalAlignment="Top">
             <StackPanel>
-              <TextBlock Text="节点与时区" Style="{StaticResource SectionTitle}" />
-              <TextBlock Text="VLESS 节点链接" FontWeight="SemiBold" Margin="0,16,0,0" />
+              <TextBlock Text="节点、地区和语言" Style="{StaticResource SectionTitle}" />
+              <Button x:Name="ReadCurrentNodeButton" Style="{StaticResource Action}" Content="读取 Bettbox 当前节点"
+                      HorizontalAlignment="Left" Margin="0,12,0,0" />
+              <TextBlock Text="或填写 VLESS 节点链接" FontWeight="SemiBold" Margin="0,13,0,0" />
               <Border BorderBrush="#C9C2B4" BorderThickness="1" CornerRadius="7" Margin="0,7,0,0" Background="#FCFAF5">
                 <Grid>
                   <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
@@ -295,6 +297,11 @@
               <TextBlock Text="应用后的 Windows 时区" FontWeight="SemiBold" />
               <ComboBox x:Name="Zones" Style="{StaticResource ZoneMenu}" DisplayMemberPath="Label" SelectedValuePath="Id" AutomationProperties.Name="应用后的 Windows 时区"
                         MinHeight="39" VerticalContentAlignment="Center" MaxDropDownHeight="320" Margin="0,7,0,1" />
+              <StackPanel x:Name="LocaleChoices" Visibility="Collapsed" Margin="0,13,0,0">
+                <TextBlock Text="应用后的语言和区域格式" FontWeight="SemiBold" />
+                <ComboBox x:Name="Locales" Style="{StaticResource ZoneMenu}" DisplayMemberPath="Label" SelectedValuePath="Id" AutomationProperties.Name="应用后的语言和区域格式"
+                          MinHeight="39" VerticalContentAlignment="Center" MaxDropDownHeight="260" Margin="0,7,0,0" />
+              </StackPanel>
             </StackPanel>
           </Border>
           <Border Grid.Column="2" Style="{StaticResource Panel}" Padding="20,18" VerticalAlignment="Top">
@@ -374,6 +381,15 @@
                 </StackPanel>
               </Grid>
               <StackPanel x:Name="ResultFacts" Margin="0,13,0,0" Visibility="Collapsed" />
+              <StackPanel x:Name="ResultUserRegion" Margin="0,14,0,0" Visibility="Collapsed">
+                <TextBlock Text="本次防护更新未完成。可以单独应用已核实节点的地区和语言设置。" Style="{StaticResource Body}" />
+                <Button x:Name="ApplyUserRegionButton" Style="{StaticResource Action}" Content="只应用当前节点的地区和语言"
+                        HorizontalAlignment="Left" Margin="0,6,0,0" />
+                <TextBlock x:Name="UserRegionResult" Style="{StaticResource Body}" Margin="0,6,0,0" Visibility="Collapsed"
+                           AutomationProperties.LiveSetting="Polite" />
+                <StackPanel x:Name="UserRegionManual" />
+              </StackPanel>
+              <StackPanel x:Name="ResultManual" Margin="0,12,0,0" Visibility="Collapsed" />
               <TextBlock x:Name="ResultEntry" Margin="0,13,0,0" FontWeight="SemiBold" />
             </StackPanel>
           </Border>
@@ -413,11 +429,12 @@
           <Button x:Name="LeaveButton" Style="{StaticResource TextAction}" Content="关闭" Margin="0,0,8,0" />
           <Button x:Name="ProbeButton" Style="{StaticResource Action}" Content="试测出口" Margin="0,0,8,0" Visibility="Collapsed" />
           <Button x:Name="CancelProbeButton" Style="{StaticResource Action}" Content="取消试测" Visibility="Collapsed" />
+          <Button x:Name="ReviewAgain" Style="{StaticResource Action}" Content="重新核对变更" Margin="0,0,8,0" Visibility="Collapsed" />
           <Button x:Name="PrimaryButton" Style="{StaticResource Primary}" Visibility="Collapsed" />
         </StackPanel>
         <StackPanel VerticalAlignment="Center">
           <TextBlock x:Name="FooterText" Style="{StaticResource Label}" />
-          <TextBlock x:Name="Version" Style="{StaticResource Label}" Text="Claude Guard 1.0.1" FontSize="12" />
+          <TextBlock x:Name="Version" Style="{StaticResource Label}" Text="Claude Guard" FontSize="12" />
         </StackPanel>
       </DockPanel>
     </Border>

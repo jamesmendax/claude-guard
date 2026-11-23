@@ -2,23 +2,29 @@
 
 Claude Guard is a Windows x64 tool for keeping the Microsoft Store edition of Claude Desktop on one approved Bettbox IPv4 exit. A single health-check timeout triggers another check. When Guard confirms that the channel has failed, it closes the protected application's network access before stopping it. The user reopens Claude Desktop after restoring the proxy.
 
-![Claude Guard overview with sample data](docs/images/overview.png)
+![Claude Guard 1.0.1 overview with sample data](docs/images/overview.png)
+
+## What's new in 1.0.4
+
+- Review the selected Bettbox node and verified exit alongside the Windows time zone, country or region, regional format, preferred languages, and Edge website languages. Settings that have more than one valid regional choice ask you to choose.
+- Repair the current user's regional settings when Guard verifies the existing route and exit but the Store registration check blocks a protection update. The repair reports the existing protection status separately and rechecks Windows preferred languages after they have had time to settle.
+- Open Edge's website-language settings when the profile is busy. A separate, explicit check opens a local page and shows the language preference that Edge actually sent. The setup window reports display languages and the default input method separately.
 
 ## Source availability
 
-This repository includes the original Claude Guard interface, Windows protection components, and test fixtures prepared for public release. The 1.0.1 installer and complete source archive also include eight scripts derived from gruskry/claude-vpn-guard. The pinned upstream version has no published license declaration. Distribution of those scripts and the two complete artifacts is awaiting confirmation of the applicable terms. [Upstream v1.4.4](https://github.com/gruskry/claude-vpn-guard/releases/tag/v1.4.4)
+This repository publishes the original Claude Guard source and test fixtures. The complete 1.0.4 installer and source archive contain eight inherited scripts from gruskry/claude-vpn-guard. The pinned upstream revision lacks a published redistribution license. The original installer and complete archive remain private pending confirmation of the terms. Building the full installer requires the omitted scripts and pinned dependencies. [Third-party notices](NOTICE.md)
 
-The SHA-256 file identifies the exact installer and source ZIP built for the original 1.0.1 release. [Original artifact checksums](checksums/ClaudeGuardSetup-1.0.1-SHA256.txt)
+The SHA-256 files identify the original local installer and complete source ZIP for each version. [1.0.4 checksums](checksums/ClaudeGuardSetup-1.0.4-SHA256.txt) · [1.0.1 checksums](checksums/ClaudeGuardSetup-1.0.1-SHA256.txt)
 
 ## Try the interface
 
 On Windows x64 with the .NET Framework WPF components and 64-bit Windows PowerShell 5.1, run the native window fixture from the checkout root.
 
 ~~~powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tests/setup-native-window-tests.ps1
+powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File ./tests/setup-native-window-tests.ps1
 ~~~
 
-The fixture runs the actual WPF window with sample data. It exercises node changes, verification progress, recovery, and stop details. Its mock actions use no live Claude Desktop session or proxy. The overview's recent-stop entry distinguishes a Guard-initiated stop from a launcher-observed exit and a settings-window error. A nonzero exit code is shown alongside what Guard could confirm. [Example exit details](docs/images/observed-exit.png)
+The fixture opens the WPF setup window with sample data and mock actions. It exercises node changes, regional choices, verification progress, recovery, and stop details without using Claude Desktop or a live proxy. [Example exit details from 1.0.1](docs/images/observed-exit.png)
 
 ## Repository layout
 

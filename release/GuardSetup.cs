@@ -1,10 +1,13 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
+using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
@@ -16,15 +19,17 @@ using System.Windows;
 
 [assembly: AssemblyTitle("Claude Guard Setup")]
 [assembly: AssemblyProduct("Claude Guard")]
-[assembly: AssemblyVersion("1.0.1.0")]
-[assembly: AssemblyFileVersion("1.0.1.0")]
-[assembly: AssemblyInformationalVersion("1.0.1")]
+[assembly: AssemblyVersion("1.0.4.0")]
+[assembly: AssemblyFileVersion("1.0.4.0")]
+[assembly: AssemblyInformationalVersion("1.0.4")]
 
-internal static class GuardSetup
+internal static partial class GuardSetup
 {
     private const string SetupName = "Claude Guard Setup";
     private const string Launcher = "ClaudeGuardSetup.exe";
-    internal const string ReleaseVersion = "1.0.1";
+    internal const string ReleaseVersion = "1.0.4";
+    private const string ApplyCurrentNode = "--apply-current-node";
+    private const string RetirePrevious = "--retire-previous";
     private const string ActionsPath = "release/guard-window-actions.ps1";
     private static readonly Assembly Image = Assembly.GetExecutingAssembly();
     private static readonly SecurityIdentifier Administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
@@ -42,9 +47,11 @@ internal static class GuardSetup
     internal static int Main(string[] args)
     {
         bool consoleOnly = args.Length > 0 && (args[0] == "--verify" || args[0] == "--extract-test" ||
-            args[0] == "--background-controller" || args[0] == "--background-notifier");
+            args[0] == "--background-controller" || args[0] == "--background-notifier" || args[0] == "--apply-user-region" || args[0] == "--user-region-settings");
         try
         {
+            if(args.Length>0 && (args[0]=="--apply-user-region" || args[0]=="--user-region-settings"))
+                return RunUserRegionMode(args);
             if (args.Length == 1 && args[0] == "--verify")
             {
                 Bundle bundle = new Bundle();
@@ -78,43 +85,54 @@ internal static class GuardSetup
                 if (args.Length == 1 && (args[0] == "--background-controller" || args[0] == "--background-notifier"))
                     return RunBackground(args[0] == "--background-controller", elevated);
 
-                string mode;
-                if (args.Length == 0 || (args.Length == 1 && IsWindowMode(args[0])))
+                bool approved = args.Length >= 2 && args[0] == "--approved";
+                int offset = approved ? 2 : 0;
+                string mode = args.Length > offset ? args[offset] : "";
+                string country = null;
+                string ipv4 = null;
+                bool retirePrevious = false;
+                if (mode == ApplyCurrentNode)
                 {
-                    mode = args.Length == 1 ? args[0] : "";
-                    if (!elevated)
-                    {
-                        var start = new ProcessStartInfo(Image.Location, "--approved " + sid + " " + mode);
-                        start.UseShellExecute = true;
-                        start.Verb = "runas";
-                        start.WorkingDirectory = Environment.SystemDirectory;
-                        // Keep the reviewed executable pinned against replacement while UAC opens it.
-                        using (FileStream own = OpenImage())
-                        {
-                            ReadBoundImage(own);
-                            using (Process child = Process.Start(start))
-                            {
-                                if (child == null) throw new InvalidOperationException("Windows did not start the approved setup process.");
-                                child.WaitForExit();
-                                return child.ExitCode;
-                            }
-                        }
-                    }
+                    retirePrevious = args.Length == offset + 4 && args[offset + 3] == RetirePrevious;
+                    if ((args.Length != offset + 3 && !retirePrevious) || !IsCurrentNodeTarget(args[offset + 1], args[offset + 2]))
+                        throw new InvalidOperationException("用法：--apply-current-node 国家代码 公网 IPv4 [--retire-previous]。");
+                    country = args[offset + 1];
+                    ipv4 = args[offset + 2];
                 }
-                else if ((args.Length == 2 || (args.Length == 3 && IsWindowMode(args[2]))) && args[0] == "--approved")
-                {
-                    consoleOnly = !elevated;
-                    if (!elevated || args[1] != sid)
-                        throw new InvalidOperationException("Approve setup as the same Windows account that opened it.");
-                    mode = args.Length == 3 ? args[2] : "";
-                }
-                else
+                else if (args.Length != offset && (args.Length != offset + 1 || !IsWindowMode(mode)))
                 {
                     consoleOnly = true;
                     throw new InvalidOperationException("Unknown setup arguments.");
                 }
 
-                return RunApproved(mode);
+                string windowArguments = country == null ? mode : mode + " " + country + " " + ipv4;
+                if (retirePrevious) windowArguments += " " + RetirePrevious;
+                if (approved)
+                {
+                    consoleOnly = !elevated;
+                    if (!elevated || args[1] != sid)
+                        throw new InvalidOperationException("Approve setup as the same Windows account that opened it.");
+                }
+                else if (!elevated)
+                {
+                    var start = new ProcessStartInfo(Image.Location, "--approved " + sid + " " + windowArguments);
+                    start.UseShellExecute = true;
+                    start.Verb = "runas";
+                    start.WorkingDirectory = Environment.SystemDirectory;
+                    // Keep the reviewed executable pinned against replacement while UAC opens it.
+                    using (FileStream own = OpenImage())
+                    {
+                        ReadBoundImage(own);
+                        using (Process child = Process.Start(start))
+                        {
+                            if (child == null) throw new InvalidOperationException("Windows did not start the approved setup process.");
+                            child.WaitForExit();
+                            return child.ExitCode;
+                        }
+                    }
+                }
+
+                return RunApproved(mode, windowArguments, sid, country, ipv4, retirePrevious);
             }
         }
         catch (Win32Exception error)
@@ -134,6 +152,15 @@ internal static class GuardSetup
 
     private static bool IsWindowMode(string mode) { return mode == "--settings" || mode == "--update"; }
 
+    internal static bool IsCurrentNodeTarget(string country, string ipv4)
+    {
+        IPAddress address;
+        return country.Length == 2 && country[0] >= 'A' && country[0] <= 'Z' &&
+            country[1] >= 'A' && country[1] <= 'Z' &&
+            IPAddress.TryParse(ipv4, out address) && address.AddressFamily == AddressFamily.InterNetwork &&
+            String.Equals(address.ToString(), ipv4, StringComparison.Ordinal);
+    }
+
     private static void RequireNativeAmd64()
     {
         try
@@ -147,7 +174,7 @@ internal static class GuardSetup
         throw new PlatformNotSupportedException("This Sandboxie driver requires native x64 Windows.");
     }
 
-    private static int RunApproved(string mode)
+    private static int RunApproved(string mode, string windowArguments, string sid, string country, string ipv4, bool retirePrevious)
     {
         if (!Environment.Is64BitProcess || !Environment.UserInteractive)
             throw new InvalidOperationException("Setup requires a 64-bit interactive Windows session.");
@@ -179,7 +206,7 @@ internal static class GuardSetup
         string launcher = Path.Combine(stage, Launcher);
         if (!String.Equals(Image.Location, launcher, StringComparison.OrdinalIgnoreCase))
         {
-            var start = new ProcessStartInfo(launcher, mode);
+            var start = new ProcessStartInfo(launcher, "--approved " + sid + " " + windowArguments);
             start.UseShellExecute = false;
             start.CreateNoWindow = true;
             start.WorkingDirectory = Environment.SystemDirectory;
@@ -200,7 +227,7 @@ internal static class GuardSetup
         try
         {
             using (var actions = new GuardSetupActions(Destination(stage, ActionsPath)))
-                return GuardSetupWindow.Run(actions, mode == "--settings", mode == "--update");
+                return GuardSetupWindow.Run(actions, mode == "--settings", mode == "--update", country, ipv4, retirePrevious);
         }
         catch (Exception error)
         {

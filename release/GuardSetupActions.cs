@@ -12,10 +12,15 @@ internal interface IGuardSetupActions
 {
     IDictionary Home();
     IDictionary Probe(string node, CancellationToken token);
-    IDictionary Region(string zoneId);
+    IDictionary ProbeCurrentNode(CancellationToken token);
+    IDictionary Region(string zoneId, string localeName);
     IDictionary Update();
-    IDictionary Apply(string zoneId);
+    IDictionary Apply(string zoneId, string localeName);
+    IDictionary ApplyCurrentNode(string country, string ipv4, bool retirePrevious);
     IDictionary Recover();
+    IDictionary CheckManualSetting(string setting, string target, bool confirmEdge, string operation);
+    void OpenManualSetting(string settingId);
+    IDictionary StartUserRegion(string country, string ipv4);
     IDictionary Progress();
     void ClearPreview();
 }
@@ -88,7 +93,8 @@ internal sealed class GuardSetupActions : IGuardSetupActions, IDisposable
 
     private IDictionary Change(string command, params object[] arguments)
     {
-        ReportProgress("Preparing", 0, command == "Restore-GuardWindow" ? 2 : 6, null, null, 0, 0);
+        string phase = command == "Set-GuardWindowCurrentNode" ? "CheckingCurrentNode" : "Preparing";
+        ReportProgress(phase, 0, command == "Restore-GuardWindow" ? 2 : 6, null, null, 0, 0);
         try { return Invoke(command, arguments); }
         catch (Exception) { return new Hashtable { { "Success", false }, { "Restored", false }, { "Message", Failure } }; }
     }
@@ -106,15 +112,37 @@ internal sealed class GuardSetupActions : IGuardSetupActions, IDisposable
         catch (Exception) { return new Hashtable { { "Ok", false }, { "Message", Failure } }; }
     }
 
-    public IDictionary Region(string zoneId)
+    public IDictionary ProbeCurrentNode(CancellationToken token)
     {
-        try { return Invoke("Get-GuardWindowRegion", "ZoneId", zoneId); }
+        try { return Invoke("Get-GuardWindowProbe", "CurrentBettbox", true, "Token", token); }
+        catch (Exception) { return new Hashtable { { "Ok", false }, { "Message", Failure } }; }
+    }
+
+    public IDictionary Region(string zoneId, string localeName)
+    {
+        try { return Invoke("Get-GuardWindowRegion", "ZoneId", zoneId, "LocaleName", localeName); }
         catch (Exception) { return new Hashtable { { "RequiresChoice", true }, { "Message", Failure } }; }
     }
 
     public IDictionary Update() { return Change("Update-GuardWindow"); }
-    public IDictionary Apply(string zoneId) { return Change("Set-GuardWindowNode", "ZoneId", zoneId); }
+    public IDictionary Apply(string zoneId, string localeName)
+    {
+        return Change("Set-GuardWindowNode", "ZoneId", zoneId, "LocaleName", localeName);
+    }
+    public IDictionary ApplyCurrentNode(string country, string ipv4, bool retirePrevious)
+    {
+        return Change("Set-GuardWindowCurrentNode", "CountryCode", country, "ExitIpv4", ipv4, "RetirePrevious", retirePrevious);
+    }
     public IDictionary Recover() { return Change("Restore-GuardWindow"); }
+
+    public IDictionary CheckManualSetting(string setting, string target, bool confirmEdge, string operation)
+    {
+        return Invoke("Get-GuardWindowManualCheck", "Setting", setting, "Target", target, "ConfirmEdge", confirmEdge, "Operation", operation);
+    }
+
+    public void OpenManualSetting(string settingId) { ClaudeGuard.SiteLanguage.OpenManualSetting(settingId); }
+
+    public IDictionary StartUserRegion(string country, string ipv4) { return GuardSetup.StartUserRegion(country, ipv4); }
 
     private void ReportProgress(string phase, int proofs, int required, string status, string worker, int elapsed, int timeout)
     {

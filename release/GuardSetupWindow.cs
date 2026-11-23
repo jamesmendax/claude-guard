@@ -7,6 +7,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Automation.Peers;
 using System.Windows.Controls;
 using System.Windows.Documents;
@@ -19,9 +20,9 @@ using Ellipse = System.Windows.Shapes.Ellipse;
 
 internal static class GuardSetupWindow
 {
-    internal static int Run(IGuardSetupActions actions, bool settings, bool startUpdate)
+    internal static int Run(IGuardSetupActions actions, bool settings, bool startUpdate, string country, string ipv4, bool retirePrevious)
     {
-        var view = new View(actions, settings, startUpdate);
+        var view = new View(actions, settings, startUpdate, country, ipv4, retirePrevious);
         view.Window.ShowDialog();
         view.WaitForPreviewClear();
         return view.ExitCode;
@@ -31,7 +32,7 @@ internal static class GuardSetupWindow
     {
         private enum Page { Home, Nodes, Prerequisites, Plan, Audit, Work, Result, Stop }
         private enum CheckFilter { All, Issue, Change }
-        private enum Operation { None, Load, Probe, Region, Update, Apply, Recover }
+        private enum Operation { None, Load, Probe, Region, Update, Apply, ApplyCurrentNode, Recover, UserRegion }
         private enum ResultAction { Home, Nodes, Recover, Reload }
 
         private sealed class Zone
@@ -48,6 +49,9 @@ internal static class GuardSetupWindow
 
         private readonly IGuardSetupActions actions;
         private readonly bool settings;
+        private readonly string currentNodeCountry;
+        private readonly string currentNodeIpv4;
+        private readonly bool retirePrevious;
         private bool startUpdate;
         private readonly Button homeNav;
         private readonly Button nodesNav;
@@ -57,11 +61,13 @@ internal static class GuardSetupWindow
         private readonly Button leaveButton;
         private readonly Button primaryButton;
         private readonly Button probeButton;
+        private readonly Button currentNodeButton;
         private readonly Button cancelProbeButton;
         private readonly PasswordBox maskedNode;
         private readonly TextBox visibleNode;
         private readonly CheckBox revealNode;
         private readonly ComboBox zones;
+        private readonly ComboBox locales;
         private readonly DispatcherTimer progressTimer;
         private readonly DispatcherTimer proofTimer;
         private IDictionary homeSnapshot;
@@ -69,6 +75,11 @@ internal static class GuardSetupWindow
         private IList<IDictionary> displayedChecks = new List<IDictionary>();
         private CheckFilter checkFilter;
         private string reviewedZoneChoice;
+        private string reviewedLocaleChoice;
+        private string manualReceiptOperation;
+        private bool manualReceiptWindowsVerified;
+        private string userRegionCountry;
+        private string userRegionIpv4;
         private DateTimeOffset? proofExpiry;
         private Page page;
         private Operation work;
@@ -79,6 +90,7 @@ internal static class GuardSetupWindow
         private bool changingText;
         private bool settingZones;
         private bool regionReady;
+        private bool currentBettboxPreview;
         private bool closeAfterProbe;
         private bool progressRead;
         private bool updateNeedsInstallation;
@@ -92,11 +104,15 @@ internal static class GuardSetupWindow
         internal Window Window { get; private set; }
         internal int ExitCode { get; private set; }
 
-        internal View(IGuardSetupActions actions, bool settings, bool startUpdate)
+        internal View(IGuardSetupActions actions, bool settings, bool startUpdate,
+            string country = null, string ipv4 = null, bool retirePrevious = false)
         {
             this.actions = actions;
             this.settings = settings;
             this.startUpdate = startUpdate;
+            currentNodeCountry = country;
+            currentNodeIpv4 = ipv4;
+            this.retirePrevious = retirePrevious;
             using (Stream stream = typeof(GuardSetupWindow).Assembly.GetManifestResourceStream("Guard.SetupWindow"))
                 Window = (Window)XamlReader.Load(stream);
 
@@ -108,11 +124,13 @@ internal static class GuardSetupWindow
             leaveButton = Find<Button>("LeaveButton");
             primaryButton = Find<Button>("PrimaryButton");
             probeButton = Find<Button>("ProbeButton");
+            currentNodeButton = Find<Button>("ReadCurrentNodeButton");
             cancelProbeButton = Find<Button>("CancelProbeButton");
             maskedNode = Find<PasswordBox>("MaskedNode");
             visibleNode = Find<TextBox>("VisibleNode");
             revealNode = Find<CheckBox>("RevealNode");
             zones = Find<ComboBox>("Zones");
+            locales = Find<ComboBox>("Locales");
 
             homeNav.Click += delegate { ShowHome(); };
             nodesNav.Click += delegate { NavigateNodes(); };
@@ -127,8 +145,16 @@ internal static class GuardSetupWindow
             homePrimary.Click += async delegate { await Primary(); };
             leaveButton.Click += delegate { Window.Close(); };
             probeButton.Click += async delegate { await Probe(); };
+            currentNodeButton.Click += async delegate { await Probe(true); };
             cancelProbeButton.Click += delegate { CancelProbe(); };
             primaryButton.Click += async delegate { await Primary(); };
+            Find<Button>("ApplyUserRegionButton").Click += async delegate { await ApplyUserRegion(); };
+            Find<Button>("ReviewAgain").Click += async delegate
+            {
+                if (work != Operation.None || page != Page.Plan || CheckProofExpiry()) return;
+                await RefreshRegion();
+                if (page == Page.Plan) ShowPlan();
+            };
             maskedNode.PasswordChanged += delegate { NodeEdited(); };
             visibleNode.TextChanged += delegate { NodeEdited(); };
             revealNode.Checked += delegate { Reveal(true); };
@@ -137,6 +163,10 @@ internal static class GuardSetupWindow
             {
                 if (!settingZones && work == Operation.None && !String.IsNullOrEmpty(exitIpv4))
                     await RefreshRegion();
+            };
+            locales.SelectionChanged += async delegate
+            {
+                if (work == Operation.None && !String.IsNullOrEmpty(exitIpv4)) await RefreshRegion();
             };
             Window.PreviewKeyDown += NavigateByKey;
             Window.Closing += Closing;
@@ -308,7 +338,7 @@ internal static class GuardSetupWindow
             if (!homeLoaded || recoveryPending || work != Operation.None) return;
             CheckProofExpiry();
             Show(Page.Nodes, installed ? "更换节点" : "配置安装节点",
-                "填写节点链接并试测。Guard 会用测得的公网 IPv4 作为允许的出口。");
+                "读取 Bettbox 当前节点，或填写链接后试测。Guard 会核对节点的公网 IPv4。");
         }
 
         private void ShowPrerequisites()
@@ -319,7 +349,7 @@ internal static class GuardSetupWindow
             Show(Page.Prerequisites, installed ? "保留配置并更新" : "安装前检查",
                 "运行安装或更新时，Guard 会核对所需条件。");
             SetChecks(prerequisites, installed ? "沿用现有设置" : "开始前",
-                (installed ? "更新 Guard 文件，沿用当前节点、出口和 Windows 时区。 " : "") +
+                (installed ? "更新 Guard 文件，沿用当前节点、出口、地区和语言设置。 " : "") +
                 "请连接 Bettbox 并开启 TUN 模式，确认已安装 Microsoft 商店版 Claude Desktop，并保存 Claude 中的工作。");
         }
 
@@ -331,13 +361,13 @@ internal static class GuardSetupWindow
             Show(Page.Plan, "核对本次变更", "展开任意一行查看原因和处理方法。");
             string heading = !regionReady ? "暂不能应用" : changes > 0
                 ? String.Format(CultureInfo.CurrentCulture, "{0} 项设置拟更新", changes) : "核对拟应用的设置";
-            SetChecks(plan, heading, regionReady ? "确认节点、允许的出口和 Windows 时区后，再应用变更。"
+            SetChecks(plan, heading, regionReady ? "确认节点、出口、Windows 地区和语言及 Edge 网站语言后，再应用变更。"
                 : "查看问题项，按说明处理后重新核对。");
         }
 
         private bool CanReview()
         {
-            return !String.IsNullOrEmpty(Read(regionSnapshot, "TimeZone")) && !Flag(regionSnapshot, "RequiresChoice");
+            return !String.IsNullOrEmpty(exitIpv4) && (!String.IsNullOrEmpty(Read(regionSnapshot, "TimeZone")) || Checks(regionSnapshot).Count > 0);
         }
 
         private void ShowAudit()
@@ -510,12 +540,11 @@ internal static class GuardSetupWindow
                 string expected = Or(Read(row, "Expected"), "未提供");
                 string explanation = Or(Read(row, "Detail"), "此项暂无更多说明。");
                 detail.Children.Add(new Border { Background = BrushResource("Line"), Height = 1 });
-                detail.Children.Add(CheckExpander(CheckColumns(label, current, expected, CheckStatus(status), status),
-                    new TextBlock
-                    {
-                        Text = explanation, Style = (Style)Window.Resources["Body"],
-                        Margin = new Thickness(9, 0, 27, 11)
-                    }, label + "。当前值 " + current + "，应有值 " + expected + "，状态 " + CheckStatus(status), false));
+                var body = new StackPanel { Margin = new Thickness(9, 0, 27, 11) };
+                body.Children.Add(new TextBlock { Text = explanation, Style = (Style)Window.Resources["Body"] });
+                AddManualActions(body, Read(row, "Key"), Read(row, "VerificationTarget"), Read(row, "Operation"));
+                detail.Children.Add(CheckExpander(CheckColumns(label, current, expected, CheckStatus(status), status), body,
+                    label + "。当前值 " + current + "，应有值 " + expected + "，状态 " + CheckStatus(status), Flag(row, "Blocks")));
             }
 
             var heading = new DockPanel { Margin = new Thickness(8, 9, 4, 9) };
@@ -529,6 +558,124 @@ internal static class GuardSetupWindow
             panel.Children.Add(new Border { Background = BrushResource("Line"), Height = 1 });
             bool expanded = group == "settings" || page == Page.Prerequisites || checkFilter != CheckFilter.All;
             panel.Children.Add(CheckExpander(heading, detail, title, expanded));
+        }
+
+        private static string ManualSettingId(string key)
+        {
+            switch (key)
+            {
+                case "node": case "allowed-ip": case "windows-home-region": case "windows-regional-format":
+                case "windows-preferred-languages": case "edge-website-languages": return key;
+                case "actual-ip": case "country": return "allowed-ip";
+                case "windows-zone": return "windows-time-zone";
+                case "edge-site-readback": return "edge-website-languages";
+                default: return null;
+            }
+        }
+
+        private static string ManualSettingLabel(string key)
+        {
+            switch (ManualSettingId(key))
+            {
+                case "node": return "Guard 选定节点";
+                case "allowed-ip": return "允许的出口 IPv4";
+                case "windows-time-zone": return "Windows 时区";
+                case "windows-home-region": return "Windows 国家或地区";
+                case "windows-regional-format": return "Windows 区域格式";
+                case "windows-preferred-languages": return "Windows 首选语言";
+                case "edge-website-languages": return "Edge 网站首选语言";
+                default: return null;
+            }
+        }
+
+        private void AddManualActions(Panel panel, string key, string target, string operation, bool userRegionOnly = false)
+        {
+            string setting = ManualSettingId(key);
+            if (setting == null || recoveryPending) return;
+            var buttons = new WrapPanel { Margin = new Thickness(0, 5, 0, 1) };
+            var feedback = new TextBlock { Style = (Style)Window.Resources["Body"], Visibility = Visibility.Collapsed };
+            AutomationProperties.SetLiveSetting(feedback, AutomationLiveSetting.Polite);
+            bool internalSetting = setting == "node" || setting == "allowed-ip";
+            var open = new Button
+            {
+                Tag = "manual-open:" + setting,
+                Content = setting == "node" ? "打开节点设置" : setting == "allowed-ip" ? "打开节点试测" : "打开" + ManualSettingLabel(key),
+                Style = (Style)Window.Resources["Action"], Margin = new Thickness(0, 1, 7, 3)
+            };
+            open.Click += async delegate
+            {
+                if (work != Operation.None) return;
+                if (internalSetting)
+                {
+                    ShowNodes();
+                    if (page == Page.Nodes) currentNodeButton.Focus();
+                    return;
+                }
+                open.IsEnabled = false;
+                try
+                {
+                    await Task.Run(() => actions.OpenManualSetting(setting));
+                    ShowManualFeedback(feedback, "设置已打开。完成后，回到这里重新核对。");
+                }
+                catch (Exception) { ShowManualFeedback(feedback, "暂时无法打开这项设置，请重试。"); }
+                finally { open.IsEnabled = true; }
+            };
+            buttons.Children.Add(open);
+            panel.Children.Add(buttons);
+            panel.Children.Add(feedback);
+            if (internalSetting || String.IsNullOrEmpty(target)) return;
+            AddManualCheckButton(buttons, feedback, setting, target, operation, false, userRegionOnly);
+            if (setting == "edge-website-languages") AddManualCheckButton(buttons, feedback, setting, target, operation, true, userRegionOnly);
+        }
+
+        private void AddManualCheckButton(Panel panel, TextBlock feedback, string setting, string target, string operation, bool confirmEdge,
+            bool userRegionOnly)
+        {
+            var check = new Button
+            {
+                Tag = (confirmEdge ? "manual-confirm:" : "manual-check:") + setting,
+                Content = confirmEdge ? "用 Edge 核对网站语言" : "重新核对",
+                Style = (Style)Window.Resources["Action"], Margin = new Thickness(0, 1, 7, 3)
+            };
+            check.Click += async delegate
+            {
+                if (work != Operation.None) return;
+                check.IsEnabled = false;
+                ShowManualFeedback(feedback, "正在核对…");
+                try
+                {
+                    IDictionary result = await Task.Run(() => actions.CheckManualSetting(
+                        setting == "windows-time-zone" ? "windows-zone" : setting, target, confirmEdge, operation));
+                    string current = Read(result, "Current");
+                    string message = Or(Read(result, "Message"), "暂时无法读取这项设置。");
+                    if (Flag(result, "OperationVerified"))
+                    {
+                        message += " 已补记到本次变更回执。";
+                        if (page == Page.Result && manualReceiptOperation == operation)
+                        {
+                            var facts = Find<StackPanel>("ResultFacts");
+                            AddFact(facts, "网站收到的 Accept-Language", Read(result, "SiteAcceptLanguage"));
+                            facts.Visibility = Visible(facts.Children.Count > 0);
+                            Announce("ResultTitle", manualReceiptWindowsVerified ? "七项设置已核对" : "Edge 网站语言已核对");
+                            Text("ResultMessage", manualReceiptWindowsVerified ? "已确认 Edge 实际发给网站的语言。本次变更回执已更新。"
+                                : "已确认 Edge 实际发给网站的语言。Windows 首选语言仍需单独核对。");
+                            manualReceiptOperation = null;
+                        }
+                    }
+                    else if (Flag(result, "Verified") && confirmEdge && String.IsNullOrEmpty(operation))
+                        message += userRegionOnly ? "。本次只核对地区和语言，防护更新仍未完成。" : "。可重新核对变更后再应用。";
+                    ShowManualFeedback(feedback, (String.IsNullOrEmpty(current) ? "" : "当前读到 " + current + "。") + message);
+                }
+                catch (Exception) { ShowManualFeedback(feedback, "暂时无法读取这项设置，请重试。"); }
+                finally { check.IsEnabled = true; }
+            };
+            panel.Children.Add(check);
+        }
+
+        private static void ShowManualFeedback(TextBlock feedback, string message)
+        {
+            feedback.Text = message;
+            feedback.Visibility = Visibility.Visible;
         }
 
         private Expander CheckExpander(object heading, object content, string name, bool expanded)
@@ -641,7 +788,7 @@ internal static class GuardSetupWindow
             var summary = Find<TextBlock>("WorkProofSummary");
             summary.Visibility = Visibility.Collapsed;
             Find<UniformGrid>("WorkProofs").Visibility = Visibility.Collapsed;
-            RenderStages(work == Operation.Update || work == Operation.Apply ? 0 : -1);
+            RenderStages(work == Operation.Update || work == Operation.Apply || work == Operation.ApplyCurrentNode ? 0 : -1);
             Show(Page.Work, title, "此窗口会显示当前阶段和验收进度。");
         }
 
@@ -652,6 +799,15 @@ internal static class GuardSetupWindow
             Find<Border>("ResultMarkSurface").Background = BrushResource(success ? "GoodPaper" : warning ? "AmberPaper" : "RedPaper");
             Find<StackPanel>("ResultFacts").Children.Clear();
             Find<StackPanel>("ResultFacts").Visibility = Visibility.Collapsed;
+            Find<StackPanel>("ResultManual").Children.Clear();
+            Find<StackPanel>("ResultManual").Visibility = Visibility.Collapsed;
+            manualReceiptOperation = null;
+            manualReceiptWindowsVerified = false;
+            userRegionCountry = null;
+            userRegionIpv4 = null;
+            Find<StackPanel>("ResultUserRegion").Visibility = Visibility.Collapsed;
+            Find<StackPanel>("UserRegionManual").Children.Clear();
+            Find<TextBlock>("UserRegionResult").Visibility = Visibility.Collapsed;
             var mark = Find<TextBlock>("ResultMark");
             mark.Foreground = accent;
             mark.Text = success ? "✓" : "!";
@@ -679,14 +835,20 @@ internal static class GuardSetupWindow
             backButton.Visibility = Visible(page == Page.Prerequisites || page == Page.Plan || page == Page.Audit || page == Page.Stop);
             backButton.Content = page == Page.Plan ? "‹ 返回节点设置" : "‹ 返回总览";
             probeButton.Visibility = Visible(page == Page.Nodes && work != Operation.Probe);
-            probeButton.Content = String.IsNullOrEmpty(exitIpv4) ? "试测出口" : "重新试测";
+            probeButton.Content = String.IsNullOrEmpty(exitIpv4) || currentBettboxPreview ? "试测链接出口" : "重新试测";
             probeButton.IsEnabled = idle;
+            currentNodeButton.IsEnabled = idle;
             cancelProbeButton.Visibility = Visible(work == Operation.Probe);
             cancelProbeButton.IsEnabled = probeCancellation != null && !probeCancellation.IsCancellationRequested;
             maskedNode.IsEnabled = idle;
             visibleNode.IsEnabled = idle;
             revealNode.IsEnabled = idle;
             zones.IsEnabled = idle;
+            locales.IsEnabled = idle;
+            Find<Button>("ApplyUserRegionButton").IsEnabled = idle;
+            var reviewAgain = Find<Button>("ReviewAgain");
+            reviewAgain.Visibility = Visible(page == Page.Plan && CanReview());
+            reviewAgain.IsEnabled = idle;
             primaryButton.Visibility = Visible(page == Page.Nodes || page == Page.Plan || page == Page.Prerequisites || page == Page.Result);
             primaryButton.IsEnabled = idle && (page != Page.Nodes || CanReview()) && (page != Page.Plan || regionReady);
             if (page == Page.Nodes) primaryButton.Content = "查看变更清单 ›";
@@ -707,7 +869,8 @@ internal static class GuardSetupWindow
         private async void Loaded(object sender, RoutedEventArgs args)
         {
             Window.Loaded -= Loaded;
-            await LoadHome();
+            if (currentNodeCountry != null) await Change(Operation.ApplyCurrentNode);
+            else await LoadHome();
         }
 
         private async Task LoadHome()
@@ -751,7 +914,7 @@ internal static class GuardSetupWindow
             Text("HomeIp", Or(Read(snapshot, "ExitIpv4"), installed ? "暂未核对" : "待试测"));
             Text("HomeZone", Or(Read(snapshot, "TimeZone"), "暂不可用"));
             Text("HomeNode", Or(Read(snapshot, "NodeLabel"), installed ? "已保存" : "未配置"));
-            Text("Version", "Claude Guard " + Or(Read(snapshot, "Version"), "1.0.1"));
+            Text("Version", "Claude Guard " + Or(Read(snapshot, "Version"), GuardSetup.ReleaseVersion));
             Brush stateColor = BrushResource(ready ? "Green" : installed ? "Amber" : "Muted");
             Find<TextBlock>("HomeState").Foreground = stateColor;
             Find<Ellipse>("HomeStateDot").Fill = stateColor;
@@ -834,9 +997,12 @@ internal static class GuardSetupWindow
             proofExpiry = null;
             regionSnapshot = null;
             reviewedZoneChoice = null;
+            reviewedLocaleChoice = null;
             regionReady = false;
+            currentBettboxPreview = false;
             exitIpv4 = null;
             country = null;
+            LoadLocales(null, null);
             if (!hadPreview && !force) return;
             Task priorClear = clearingPreview;
             clearingPreview = Task.Run(async () =>
@@ -870,13 +1036,14 @@ internal static class GuardSetupWindow
             Announce("ProofDetail", message);
         }
 
-        private async Task Probe()
+        private async Task Probe(bool currentBettbox = false)
         {
             if (work != Operation.None || page != Page.Nodes) return;
-            string node = NodeText().Trim();
+            string node = currentBettbox ? "" : NodeText().Trim();
+            if (currentBettbox) ClearNode();
             ClearPreview();
             ResetProofText();
-            if (!node.StartsWith("vless://", StringComparison.OrdinalIgnoreCase) || node.Length <= 8)
+            if (!currentBettbox && (!node.StartsWith("vless://", StringComparison.OrdinalIgnoreCase) || node.Length <= 8))
             {
                 ShowProof("请填写 VLESS 节点链接", "从 Bettbox 复制完整链接，再试测出口。", false, true);
                 RenderButtons();
@@ -886,12 +1053,13 @@ internal static class GuardSetupWindow
             work = Operation.Probe;
             probeCancellation = new CancellationTokenSource();
             CancellationToken token = probeCancellation.Token;
-            ShowProof("正在试测出口", "正在通过这条线路查询公网 IPv4。", false, false);
+            ShowProof("正在试测出口", currentBettbox ? "正在读取 Bettbox 当前节点并查询公网 IPv4。"
+                : "正在通过这条线路查询公网 IPv4。", false, false);
             RenderButtons();
             try
             {
                 await clearingPreview;
-                IDictionary proof = await Task.Run(() => actions.Probe(node, token));
+                IDictionary proof = await Task.Run(() => currentBettbox ? actions.ProbeCurrentNode(token) : actions.Probe(node, token));
                 token.ThrowIfCancellationRequested();
                 if (!Flag(proof, "Ok") || String.IsNullOrEmpty(Read(proof, "ExitIpv4")))
                 {
@@ -900,6 +1068,7 @@ internal static class GuardSetupWindow
                 }
                 else
                 {
+                    currentBettboxPreview = currentBettbox;
                     exitIpv4 = Read(proof, "ExitIpv4");
                     country = Read(proof, "CountryCode");
                     proofExpiry = ReadTime(proof, "ExpiresUtc");
@@ -942,7 +1111,7 @@ internal static class GuardSetupWindow
         {
             work = Operation.Region;
             regionReady = false;
-            ShowProof(ProofHeading(), "正在检查所选时区。", true, false);
+            ShowProof(ProofHeading(), "正在检查时区、地区和语言。", true, false);
             RenderButtons();
             try { await ResolveRegion(CancellationToken.None); }
             finally
@@ -980,24 +1149,27 @@ internal static class GuardSetupWindow
         private async Task ResolveRegion(CancellationToken token)
         {
             string choice = ZoneId();
+            string localeName = LocaleName();
             IDictionary region;
-            try { region = await Task.Run(() => actions.Region(choice)); }
+            try { region = await Task.Run(() => actions.Region(choice, localeName)); }
             catch (Exception) { region = null; }
             token.ThrowIfCancellationRequested();
             string timeZone = Read(region, "TimeZone");
             regionSnapshot = region;
             reviewedZoneChoice = choice;
+            reviewedLocaleChoice = localeName;
+            LoadLocales(region == null ? null : region["LocaleChoices"] as IEnumerable, localeName);
             proofExpiry = ReadTime(region, "ExpiresUtc") ?? proofExpiry;
             if (proofExpiry.HasValue) proofTimer.Start();
             List<IDictionary> checks = Checks(region);
-            regionReady = CanReview() && !checks.Exists(row => Flag(row, "Blocks"));
+            regionReady = !String.IsNullOrEmpty(timeZone) && !Flag(region, "RequiresChoice") && !checks.Exists(row => Flag(row, "Blocks"));
             Text("ProofIp", exitIpv4);
             Text("ProofCountry", Or(Read(checks.Find(row => Read(row, "Key") == "country"), "Current"), Or(country, "未知")));
             Text("ProofZone", Or(timeZone, "待确认"));
             Find<FrameworkElement>("ProofFacts").Visibility = Visible(!String.IsNullOrEmpty(exitIpv4));
             Text("ProofExpiry", proofExpiry.HasValue ? "试测有效至 " + proofExpiry.Value.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture) : "");
             Find<TextBlock>("ProofExpiry").Visibility = Visible(proofExpiry.HasValue);
-            if (CanReview())
+            if (!String.IsNullOrEmpty(timeZone) && !Flag(region, "RequiresChoice"))
             {
                 string message = "应用后的 Windows 时区为 " + timeZone + "。";
                 string note = Read(region, "Message");
@@ -1007,9 +1179,37 @@ internal static class GuardSetupWindow
             }
             else
             {
-                string message = region == null ? "无法检查时区。请重新试测出口。" : "请选择城市，或保留当前 Windows 时区。";
+                string message = region == null ? "无法检查地区和语言。请重新试测出口。" : "请选择城市，或保留当前 Windows 时区。";
                 ShowProof(ProofHeading(), Or(Read(region, "Message"), message), false, region == null);
             }
+        }
+
+        private void LoadLocales(IEnumerable catalog, string selected)
+        {
+            var choices = new List<Zone>();
+            if (catalog != null)
+            {
+                foreach (object item in catalog)
+                {
+                    string name = Convert.ToString(item, CultureInfo.InvariantCulture);
+                    try
+                    {
+                        CultureInfo culture = CultureInfo.GetCultureInfo(name);
+                        if (!String.IsNullOrEmpty(culture.Name))
+                            choices.Add(new Zone(culture.Name, culture.NativeName + " (" + culture.Name + ")"));
+                    }
+                    catch (CultureNotFoundException) { }
+                }
+            }
+            locales.ItemsSource = choices;
+            locales.SelectedValue = selected;
+            Find<FrameworkElement>("LocaleChoices").Visibility = Visible(choices.Count > 1);
+        }
+
+        private string LocaleName()
+        {
+            var locale = locales.SelectedItem as Zone;
+            return locale == null ? "" : locale.Id;
         }
 
         private async Task Primary()
@@ -1026,7 +1226,8 @@ internal static class GuardSetupWindow
                 }
             }
             else if (page == Page.Nodes) ShowPlan();
-            else if (page == Page.Plan && regionReady && !CheckProofExpiry() && reviewedZoneChoice == ZoneId())
+            else if (page == Page.Plan && regionReady && !CheckProofExpiry() && reviewedZoneChoice == ZoneId() &&
+                reviewedLocaleChoice == LocaleName())
                 await Change(Operation.Apply);
             else if (page == Page.Result)
             {
@@ -1042,11 +1243,18 @@ internal static class GuardSetupWindow
             work = operation;
             operationId++;
             string choice = reviewedZoneChoice;
-            bool firstInstall = !installed;
+            string localeName = reviewedLocaleChoice;
+            IDictionary reviewed = regionSnapshot;
+            bool currentNode = operation == Operation.ApplyCurrentNode;
+            bool firstInstall = !installed && !currentNode;
+            bool nodeChange = currentNode || operation == Operation.Apply;
             string title = operation == Operation.Recover ? "恢复上次操作" : operation == Operation.Update
-                ? "更新 Claude Guard" : firstInstall ? "安装 Claude Guard" : "应用节点";
-            ShowWork(title, operation == Operation.Recover ? "正在恢复之前的配置" : "正在检查安装条件",
-                operation == Operation.Update ? "沿用现有节点和 Windows 时区。" : "完成后会显示操作结果。",
+                ? "更新 Claude Guard" : firstInstall ? "安装 Claude Guard" : currentNode ? "应用当前 Bettbox 节点" : "应用节点";
+            string phase = currentNode ? "正在试测当前 Bettbox 节点"
+                : operation == Operation.Recover ? "正在恢复之前的配置" : "正在检查安装条件";
+            string detail = currentNode ? "正在核对指定的出口 " + currentNodeCountry + " " + currentNodeIpv4 + "。"
+                : operation == Operation.Update ? "沿用当前节点、出口、地区和语言设置。" : "完成后会显示操作结果。";
+            ShowWork(title, phase, detail,
                 "操作完成后可以关闭此窗口。");
             progressTimer.Start();
 
@@ -1055,13 +1263,14 @@ internal static class GuardSetupWindow
             {
                 await clearingPreview;
                 result = await Task.Run(() => operation == Operation.Update ? actions.Update()
-                    : operation == Operation.Recover ? actions.Recover() : actions.Apply(choice));
+                    : operation == Operation.Recover ? actions.Recover()
+                    : currentNode ? actions.ApplyCurrentNode(currentNodeCountry, currentNodeIpv4, retirePrevious) : actions.Apply(choice, localeName));
             }
             catch (Exception) { }
             progressTimer.Stop();
             operationId++;
             bool success = Flag(result, "Success");
-            if (operation == Operation.Apply || success)
+            if (nodeChange || success)
             {
                 if (success) ClearNode();
                 ClearPreview();
@@ -1074,18 +1283,21 @@ internal static class GuardSetupWindow
             ExitCode = success ? 0 : 1;
             if (!refreshed) homeLoaded = false;
             ResultAction next = !refreshed ? ResultAction.Reload : recoveryPending ? ResultAction.Recover
-                : settings || (!success && operation == Operation.Apply) ? ResultAction.Nodes : ResultAction.Home;
+                : settings || (!success && nodeChange) ? ResultAction.Nodes : ResultAction.Home;
             if (success)
             {
+                bool awaitingBrowser = Read(result, "WebsiteStatus") == "AwaitingBrowser";
+                bool awaitingWindows = Read(result, "WindowsLanguageStatus") == "ManualRequired";
                 string entry = GuardedEntry(Read(result, "GuardedEntry"));
-                string message = operation == Operation.Recover ? "可以继续安装、更新或更换节点。"
+                string message = awaitingWindows || awaitingBrowser || Flag(result, "RestoredClosed") ? Read(result, "Message")
+                    : operation == Operation.Recover ? "可以继续安装、更新或更换节点。"
                     : String.IsNullOrEmpty(entry) ? Read(result, "Message") : "";
                 if (!refreshed) message = (message + " 暂时无法刷新当前防护状态。").TrimStart();
-                string heading = operation == Operation.Recover ? "恢复完成" :
+                string heading = awaitingWindows ? "部分语言设置待处理" : awaitingBrowser ? "Edge 网站语言待核对" : operation == Operation.Recover ? "恢复完成" :
                     refreshed && Flag(homeSnapshot, "Ready") ? "防护已就绪" : firstInstall ? "安装完成" :
-                    operation == Operation.Apply ? "节点已应用" : "更新完成";
+                    nodeChange ? "节点已应用" : "更新完成";
                 ShowResult(title, heading, message, entry, true, next);
-                RenderReceipt(result, true, refreshed && operation != Operation.Recover);
+                RenderReceipt(result, true, refreshed && operation != Operation.Recover, reviewed);
             }
             else
             {
@@ -1097,11 +1309,11 @@ internal static class GuardSetupWindow
                     message += " 上一次配置已恢复。";
                 ShowResult(restored ? "恢复回执" : title, operation == Operation.Recover ? "恢复未完成" :
                     restored ? "变更未生效" : "操作未完成", message, "", false, next, restored);
-                RenderReceipt(result, false, refreshed && restored);
+                RenderReceipt(result, false, refreshed && restored, reviewed);
             }
         }
 
-        private void RenderReceipt(IDictionary result, bool success, bool showConfiguration)
+        private void RenderReceipt(IDictionary result, bool success, bool showConfiguration, IDictionary reviewed = null)
         {
             var facts = Find<StackPanel>("ResultFacts");
             if (showConfiguration)
@@ -1109,14 +1321,131 @@ internal static class GuardSetupWindow
                 AddFact(facts, "Guard 节点", Read(homeSnapshot, "NodeLabel"));
                 AddFact(facts, "允许的出口 IPv4", Read(homeSnapshot, "ExitIpv4"));
                 AddFact(facts, "Windows 时区", Read(homeSnapshot, "TimeZone"));
+                AddFact(facts, "Windows 国家或地区", Read(homeSnapshot, "WindowsHomeRegion"));
+                AddFact(facts, "Windows 区域格式", Read(homeSnapshot, "WindowsRegionalFormat"));
+                AddFact(facts, "Windows 首选语言", Read(homeSnapshot, "WindowsPreferredLanguages"));
+                AddFact(facts, "Edge 网站首选语言", Read(homeSnapshot, "EdgePreferredLanguages"));
             }
+            AddFact(facts, "网站收到的 Accept-Language", Read(result, "SiteAcceptLanguage"));
             int proofs = Count(result, "RequiredProofs");
             if (proofs > 0)
                 AddFact(facts, "连续核对", String.Format(CultureInfo.CurrentCulture, "{0} / {1} 次通过", Count(result, "FreshProofs"), proofs));
             if (Flag(result, "Restored"))
-                AddFact(facts, "恢复状态", Object.Equals(result["HadPrior"], false) ? "首次安装已撤回" : "已恢复上一次配置");
+                AddFact(facts, "恢复状态", Flag(result, "RestoredClosed") ? "已恢复上一次配置，联网仍关闭"
+                    : Object.Equals(result["HadPrior"], false) ? "首次安装已撤回" : "已恢复上一次配置");
             AddFact(facts, success ? "记录详情" : "处理详情", Read(result, "Details"));
             facts.Visibility = Visible(facts.Children.Count > 0);
+            if (!success || Read(result, "WebsiteStatus") == "AwaitingBrowser" || Read(result, "WindowsLanguageStatus") == "ManualRequired")
+                RenderManualReceipt(result, reviewed);
+            if (!success && !recoveryPending && Read(result, "UserRegionCountry") == "JP" &&
+                GuardSetup.IsCurrentNodeTarget("JP", Read(result, "UserRegionIpv4")))
+            {
+                userRegionCountry = Read(result, "UserRegionCountry");
+                userRegionIpv4 = Read(result, "UserRegionIpv4");
+                Find<StackPanel>("ResultUserRegion").Visibility = Visibility.Visible;
+            }
+        }
+
+        private async Task ApplyUserRegion()
+        {
+            if (work != Operation.None || page != Page.Result || userRegionCountry == null) return;
+            string selectedCountry = userRegionCountry;
+            string selectedIpv4 = userRegionIpv4;
+            var feedback = Find<TextBlock>("UserRegionResult");
+            var manual = Find<StackPanel>("UserRegionManual");
+            manual.Children.Clear();
+            ShowManualFeedback(feedback, "正在应用当前 Windows 账户的地区和语言设置…");
+            work = Operation.UserRegion;
+            RenderButtons();
+            IDictionary result = null;
+            try { result = await Task.Run(() => actions.StartUserRegion(selectedCountry, selectedIpv4)); }
+            catch (Exception) { }
+            finally { work = Operation.None; RenderButtons(); }
+
+            string siteLanguage = Read(result, "SiteAcceptLanguage");
+            string outcome = Read(result, "Outcome");
+            var targets = SnapshotPart(result, "Targets");
+            bool windowsLanguageManual = Read(result, "WindowsLanguageStatus") == "ManualRequired";
+            bool browserManual = (outcome == "Applied" || outcome == "ManualRequired") && String.IsNullOrEmpty(siteLanguage);
+            string message = UserRegionMessage(outcome, Read(result, "Message"), siteLanguage);
+            if (windowsLanguageManual)
+            {
+                message = "Windows 首选语言需手动调整。请把目标语言移到首位，再重新核对。";
+                if (browserManual) message += "\nEdge 网站实际收到的语言仍待核对。";
+                else if (!String.IsNullOrEmpty(siteLanguage)) message += "\n网站收到的 Accept-Language：" + siteLanguage;
+                AddManualActions(manual, "windows-preferred-languages", Or(Read(targets, "LocaleName"), "ja-JP"), null, true);
+            }
+            ShowManualFeedback(feedback, message);
+            if (browserManual)
+            {
+                string edgeLanguage = Or(Read(result, "PrimaryLanguage"), FirstLanguage(targets == null ? null : targets["EdgeLanguages"]));
+                AddManualActions(manual, "edge-website-languages", Or(edgeLanguage, "ja"), null, true);
+            }
+        }
+
+        private static string UserRegionMessage(string outcome, string reason, string siteLanguage)
+        {
+            switch (outcome)
+            {
+                case "ManualRequired": return "当前账户的 Windows 地区和语言已核对。请调整 Edge 网站语言，再在这里核对网站收到的语言。";
+                case "Applied": return String.IsNullOrEmpty(siteLanguage)
+                    ? "当前账户的地区和语言已核对。Edge 网站实际收到的语言仍待核对。"
+                    : "当前账户的地区和语言已核对。\n网站收到的 Accept-Language：" + siteLanguage;
+                case "RecoveryRequired": return "上一次地区和语言变更尚需恢复。请重新运行当前账户的地区和语言操作。";
+                case "Busy": return "当前账户已有地区和语言操作正在运行，请完成后再核对。";
+            }
+            switch (reason)
+            {
+                case "The current Bettbox selection and pinned IPv4 must match the existing Guard record.":
+                    return "当前 Bettbox 节点和出口 IPv4 与 Guard 已保存的配置不一致。";
+                case "The observed exit did not match the requested country and IPv4, or could not be verified.":
+                    return "无法核实当前节点的出口国家和 IPv4，或实测值与目标不一致。";
+                case "Windows could not prepare a matching regional settings change while preserving the current menu and keyboard.":
+                    return "Windows 无法在保留当前显示语言和输入法的情况下准备所选地区设置。";
+                case "The regional change failed. The prior settings were verified.":
+                    return "地区和语言变更失败，已核对原设置。";
+                default: return "未能单独应用当前账户的地区和语言设置。";
+            }
+        }
+
+        private static string FirstLanguage(object languages)
+        {
+            var text = languages as string;
+            if (!String.IsNullOrEmpty(text)) return text.Split(',')[0].Trim();
+            var list = languages as IEnumerable;
+            if (list != null)
+            {
+                foreach (object language in list) return Convert.ToString(language, CultureInfo.InvariantCulture);
+            }
+            return "";
+        }
+
+        private void RenderManualReceipt(IDictionary result, IDictionary reviewed)
+        {
+            var keys = result == null ? null : result["ManualKeys"] as IEnumerable;
+            if (keys == null || recoveryPending) return;
+            var panel = Find<StackPanel>("ResultManual");
+            var plannedRows = Checks(reviewed);
+            var currentRows = Checks(homeSnapshot);
+            var targets = SnapshotPart(result, "ManualTargets");
+            manualReceiptOperation = Read(result, "WebsiteStatus") == "AwaitingBrowser" ? Read(result, "Operation") : null;
+            manualReceiptWindowsVerified = Read(result, "WindowsLanguageStatus") == "Verified";
+            foreach (object item in keys)
+            {
+                string key = item as string;
+                string label = ManualSettingLabel(key);
+                if (label == null) continue;
+                IDictionary planned = plannedRows.Find(row => Read(row, "Key") == key) ?? SnapshotPart(targets, key);
+                IDictionary current = currentRows.Find(row => Read(row, "Key") == key);
+                var card = new StackPanel { Margin = new Thickness(0, 5, 0, 8) };
+                card.Children.Add(new TextBlock { Text = label, FontWeight = FontWeights.SemiBold });
+                string values = "当前值 " + Or(Read(SnapshotPart(targets, key), "Current"), Or(Read(current, "Current"), Or(Read(planned, "Current"), "未读取"))) + "。 目标值 " +
+                    Or(Read(planned, "Expected"), "待核对") + "。";
+                card.Children.Add(new TextBlock { Text = values, Style = (Style)Window.Resources["Body"] });
+                AddManualActions(card, key, Read(planned, "VerificationTarget"), manualReceiptOperation);
+                panel.Children.Add(card);
+            }
+            panel.Visibility = Visible(panel.Children.Count > 0);
         }
 
         private static string GuardedEntry(string entry)
@@ -1144,6 +1473,9 @@ internal static class GuardSetupWindow
             string detail = null;
             switch (phase)
             {
+                case "CheckingCurrentNode":
+                    title = "正在试测当前 Bettbox 节点";
+                    detail = "正在核对指定的出口 " + currentNodeCountry + " " + currentNodeIpv4 + "。"; break;
                 case "Preparing":
                 case "Preflight":
                     if (work == Operation.Recover) break;
@@ -1154,8 +1486,10 @@ internal static class GuardSetupWindow
                 case "Publish": title = "正在准备防护规则"; detail = "正在发布本次防护所需的规则。"; break;
                 case "Start": title = "正在启动 Guard 防护"; detail = "启动防护后会检查实际出口和防火墙。"; break;
                 case "Verify": title = "正在核对公网出口和防火墙"; detail = "等待防护连续通过检查。"; break;
+                case "VerifyLocale": title = "正在核对地区和网站语言"; detail = "读回 Windows 设置，并核对 Edge 实际发给网页的语言。"; break;
                 case "Commit":
                 case "Completed": title = "正在确认最终状态"; detail = "正在完成本次操作。"; break;
+                case "RetirePrevious": title = "正在检查旧版安装文件"; detail = "新的防护配置已通过验收。"; break;
                 case "RollingBack": title = "正在恢复原设置"; detail = "正在用保存的记录恢复变更。"; break;
                 case "RolledBack":
                 case "RollbackIncomplete": title = "正在核对恢复结果"; detail = "正在检查当前防护配置。"; break;
@@ -1164,11 +1498,11 @@ internal static class GuardSetupWindow
             {
                 switch (phase)
                 {
-                    case "Preparing": case "Preflight": RenderStages(0); break;
+                    case "CheckingCurrentNode": case "Preparing": case "Preflight": RenderStages(0); break;
                     case "Backup": RenderStages(1); break;
                     case "Close": RenderStages(2); break;
                     case "Install": case "Publish": case "Start": RenderStages(3); break;
-                    case "Verify": case "Commit": case "Completed": RenderStages(4); break;
+                    case "Verify": case "VerifyLocale": case "Commit": case "Completed": case "RetirePrevious": RenderStages(4); break;
                 }
             }
             int needed = Count(status, "RequiredProofs");

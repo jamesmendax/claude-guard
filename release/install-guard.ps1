@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory,ParameterSetName='Recover')][switch]$Recover,
     [Parameter(ParameterSetName='Install')][switch]$RouteOnly,
     [Parameter(ParameterSetName='Install')][pscredential]$NodeProfile,
+    [Parameter(ParameterSetName='Install')][ValidatePattern('\A[A-F0-9]{64}\z')][string]$RequirePriorGeneration,
     [Parameter(ParameterSetName='Install')][Parameter(ParameterSetName='Recover')][hashtable]$NodeOperations,
     [Parameter(ParameterSetName='Install')][Parameter(ParameterSetName='Recover')][scriptblock]$ProgressCallback,
     [string]$ExpectedIpv4,
@@ -62,6 +63,10 @@ $assets=@(
 )
 . "$package\guard-runtime.ps1"
 . "$package\guard-daily-plan.ps1"
+. "$package\guard-profile-store.ps1"
+$bettboxProfileModule=Join-Path $package 'guard-bettbox-profile.ps1'
+Assert-GuardReleaseOwnedPath $bettboxProfileModule
+. $bettboxProfileModule
 . "$package\guard-sandboxie.ps1"
 . "$package\guard-daily-notifier-task.ps1"
 . "$package\guard-daily-store-stage.ps1"
@@ -79,12 +84,14 @@ $taskArguments='-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy 
 $backgroundControllerArguments='--background-controller'
 $journalFile=Join-Path $root 'release-install-pending.json'
 $statusFile=Join-Path $stage 'install-result.json'
-$result=[ordered]@{Operation=$null;Mode=$null;Phase='Preparing';Installed=$false;Restored=$false;BootRules=0;FreshProofs=0
+$result=[ordered]@{Operation=$null;Mode=$null;Phase='Preparing';Installed=$false;Restored=$false;RestoredClosed=$false;BootRules=0;FreshProofs=0
+    LocaleVerification=$null;SiteAcceptLanguage=$null;LocaleRollback=$null;LocaleFailure=$null
+    BrowserStatus=$null;WebsiteStatus=$null;AllSettingsVerified=$null
     PhaseTimes=[ordered]@{};Verification=[ordered]@{};RestoreVerification=[ordered]@{}
     Generation=$null;PriorGeneration=$null;HadPrior=$null
     FailedPhase=$null;Error=$null;RestoreError=$null}
 $state=@{Previous=$null;Record=$null;OldPolicy=$null;Policy=$null;OldWeight=$null;Weight=$null
-    Fresh=$false;NewPolicy=$false;OldPolicyRetired=$false;RootCreated=$false;DriverChanged=$false
+    Fresh=$false;NewPolicy=$false;OldPolicyRetired=$false;PriorRouteUnavailable=$false;RootCreated=$false;DriverChanged=$false
     ControllerStopped=$false;ControllerCreated=$false;NotifierTouched=$false;ProfileTouched=$false
     Notifier=$null;ControllerAction=$null;Profile=$null;Replaced=@{};CreatedFiles=[Collections.Generic.List[string]]::new()}
 $operationMutex=$null
@@ -141,6 +148,7 @@ function Save-GuardReleaseJournal {
         Deployment=$state.Record.DeploymentId;Sublayer=$state.Record.Sublayer;Weight=$state.Weight
         PriorDeployment=$state.Previous.DeploymentId;PriorSublayer=$state.Previous.Sublayer;PriorWeight=$state.OldWeight
         NewPolicy=$state.NewPolicy;OldPolicyRetired=$state.OldPolicyRetired;RootCreated=$state.RootCreated
+        PriorRouteUnavailable=$state.PriorRouteUnavailable
         ControllerStopped=$state.ControllerStopped;ControllerCreated=$state.ControllerCreated;DriverChanged=$state.DriverChanged
         ProfileTouched=$state.ProfileTouched;NotifierTouched=$state.NotifierTouched
         HadStoreStage=$state.HadStoreStage;Replaced=@($state.Replaced.Values);CreatedFiles=$state.CreatedFiles.ToArray()
@@ -433,18 +441,27 @@ function Test-GuardReleaseSandboxie($Record){
 }
 function Remove-GuardReleaseProfile {
     if($state.ProfileTouched){
-        try{$null=& $NodeOperations.Restore $state.Profile}
-        catch{throw 'The previous encrypted node and region settings could not be restored.'}
+        try{$result.LocaleRollback=& $NodeOperations.Restore $state.Profile}
+        catch{throw 'The previous encrypted node, Windows region, or Edge website language settings could not be restored.'}
     }
 }
-function Save-GuardReleasePolicyIdentity($Record,$Policy,[string]$Name) {
+function Set-GuardReleaseLocaleFailure($Failure){
+    $code=[string]$Failure.Exception.Data['GuardLocaleFailure']
+    if($code -cnotin @('WindowsPreviewChanged','WindowsReadback','WindowsTimeZone','WindowsHomeLocation','WindowsRegionalFormat',
+        'WindowsLanguages','WindowsUiLanguageOverride','WindowsInputMethodOverride','WindowsCultureFromLanguageListOptOut',
+        'EdgeApply','EdgeSettingsOpen','EdgeSettingsWindow','EdgeSettingsPage','EdgeProfile','EdgeLanguageUnavailable','EdgeLanguageOrder',
+        'EdgePreviewChanged','EdgeReadback','EdgeSiteReadback','EdgeSiteNoRequest','EdgeSiteMismatch')){return $false}
+    $result.LocaleFailure=$code
+    $true
+}
+function Save-GuardReleasePolicyIdentity($Record,$Policy,$Inventory,[string]$Name) {
     $route=if($Name -ceq 'candidate-policy.json'){$state.Route}else{$state.PriorRoute}
     $endpoint=ConvertTo-SecureString ('{0}|{1}' -f $route.Upstream.server,$route.Upstream.port) -AsPlainText -Force
     try{$protectedEndpoint=ConvertFrom-SecureString -SecureString $endpoint}finally{$endpoint.Dispose()}
     Save-GuardAdministratorJson (Join-Path $backup $Name) ([pscustomobject]@{
         Deployment=$Record.DeploymentId;Sublayer=$Policy.PersistentSublayer;Port=$Record.Port
         ProtectedEndpoint=$protectedEndpoint
-        ScopeSid=$Record.ScopeSid;PackageRoot=$Record.PackageRoot;PolicyInventory=$Record.PolicyInventory
+        ScopeSid=$Record.ScopeSid;PackageRoot=$Record.PackageRoot;PolicyInventory=$Inventory
         BaselineKeys=$Policy.GetBaselineKeys();BootKeys=$Policy.GetBootKeys()
     })
 }
@@ -481,6 +498,12 @@ function Initialize-GuardReleaseRecovery($Journal) {
         if($Journal.$name -isnot [bool]){throw 'The protected recovery flags are invalid.'}
         $state[$name]=$Journal.$name
     }
+    if($Journal.PSObject.Properties['PriorRouteUnavailable']){
+        if($Journal.PriorRouteUnavailable -isnot [bool] -or ($Journal.PriorRouteUnavailable -and $state.Fresh)){
+            throw 'The protected prior route recovery flag is invalid.'
+        }
+        $state.PriorRouteUnavailable=$Journal.PriorRouteUnavailable
+    }
     $state.Weight=$Journal.Weight
     $state.OldWeight=$Journal.PriorWeight
     $state.Record=Read-GuardReleaseRecoveryJson (Join-Path $backup 'candidate-provisioned.json')
@@ -491,6 +514,9 @@ function Initialize-GuardReleaseRecovery($Journal) {
         $state.Previous=Read-GuardReleaseRecoveryJson (Join-Path $backup 'daily-provisioned.json')
         if($state.Previous.LaunchUserSid -cne $sid -or $state.Previous.DeploymentId -ne $Journal.PriorDeployment -or
             $state.Previous.Sublayer -ne $Journal.PriorSublayer){throw 'The protected prior deployment identity changed.'}
+        if($state.PriorRouteUnavailable -and ($state.Previous.Version -ne 2 -or $state.Previous.PSObject.Properties['ProxyMode'])){
+            throw 'The protected prior route recovery flag does not match the saved installation.'
+        }
         $state.OldPolicy=Read-GuardReleaseRecoveryPolicy $state.Previous 'previous-policy.json'
         $tasks=Read-GuardReleaseRecoveryJson (Join-Path $backup 'tasks.json')
         $state.Notifier=$tasks.Notifier
@@ -534,6 +560,9 @@ $operations=@{
         $state.Previous=if([IO.File]::Exists($provisioned)){Read-GuardDailyRecord 'daily-provisioned.json'}
         $state.Fresh=-not $state.Previous
         $result.Mode=if($state.Fresh){'Fresh'}elseif($RouteOnly){'RouteOnly'}else{'Update'}
+        if($RequirePriorGeneration -and $state.Previous.Generation -cne $RequirePriorGeneration){
+            throw 'The installed Guard generation changed. Review the current settings before applying the node.'
+        }
         if($RouteOnly -and ($state.Fresh -or -not $NodeProfile)){throw 'Route-only changes require an installed release and a verified node.'}
         if($NodeProfile){
             foreach($name in 'Snapshot','Apply','Restore'){
@@ -600,11 +629,6 @@ $operations=@{
                 throw 'The protected desktop images changed before deployment.'
             }
             $port=$state.Previous.Port
-            $state.PriorRoute=Read-GuardDailyRelayConfig $port
-            if($state.PriorRoute.Hash -cne $state.Previous.RouteHash){throw 'The previously approved Guard route changed.'}
-            $state.OldWeight=[uint16]$state.Previous.AssignedSublayerWeight
-            $state.OldPolicy=New-GuardReleasePolicy $state.PriorRoute $state.Previous $recordInventory
-            if(-not (Test-GuardDailyPolicyBinding $state.Previous $state.OldPolicy)){throw 'The older firewall scope could not be reconstructed.'}
             $state.Notifier=Get-GuardDailyNotifierTaskSnapshot $sid $daily
             $record=$state.Previous | ConvertTo-Json -Depth 8 | ConvertFrom-Json
             if(-not $record.PSObject.Properties['BackupExitLookup']){
@@ -625,7 +649,32 @@ $operations=@{
             }catch{throw 'The supplied node or its rollback configuration could not be verified.'}
             if(-not $state.Profile){throw 'The previous configuration could not be captured.'}
             $record | Add-Member NoteProperty ProxyMode 'Manual' -Force
-        }else{
+        }
+        if(-not $state.Fresh){
+            $legacySelection=$NodeProfile -and -not $state.Previous.PSObject.Properties['ProxyMode']
+            $readError=$null
+            try{$state.PriorRoute=Read-GuardDailyRelayConfig $port}
+            catch{if(-not $legacySelection){throw}; $readError=$_}
+            if($state.PriorRoute.Hash -cne $state.Previous.RouteHash -and $legacySelection -and
+                $state.Profile.Node.Exists -is [bool] -and -not $state.Profile.Node.Exists){
+                $path=Get-GuardNodeStorePath
+                if(-not ((Test-GuardNodeStoreItem (Split-Path -Parent $path) -Directory) -and (Test-GuardNodeStoreItem $path))){
+                    $null=Get-GuardReleaseCanonicalIpv4 $ExpectedIpv4
+                    $state.PriorRoute=Find-GuardPriorBettboxRoute -ExpectedHash $state.Previous.RouteHash -Port $port
+                    if(-not $state.PriorRoute -or $state.PriorRoute.Hash -cne $state.Previous.RouteHash){
+                        throw 'The previously approved Guard route could not be recovered from the saved Bettbox profiles.'
+                    }
+                    # The saved route can verify the old filters. Bettbox is still using its current selection.
+                    $state.PriorRouteUnavailable=$true
+                }
+            }
+            if($readError -and -not $state.PriorRouteUnavailable){throw $readError}
+            if($state.PriorRoute.Hash -cne $state.Previous.RouteHash){throw 'The previously approved Guard route changed.'}
+            $state.OldWeight=[uint16]$state.Previous.AssignedSublayerWeight
+            $state.OldPolicy=New-GuardReleasePolicy $state.PriorRoute $state.Previous $recordInventory
+            if(-not (Test-GuardDailyPolicyBinding $state.Previous $state.OldPolicy)){throw 'The older firewall scope could not be reconstructed.'}
+        }
+        if(-not $NodeProfile){
             $state.Route=if($state.PriorRoute){$state.PriorRoute}else{Read-GuardDailyRelayConfig $port}
         }
         $pinned=if($record.VpnGuid){$record.VpnGuid}elseif($VpnGuid -ne [guid]::Empty){$VpnGuid.ToString('D')}else{
@@ -670,7 +719,8 @@ $operations=@{
         if(-not $state.Fresh){
             $original=Get-GuardReleaseAsset $provisioned (Join-Path $backup 'daily-provisioned.json')
             Set-GuardReleaseAsset $original
-            Save-GuardReleasePolicyIdentity $state.Previous $state.OldPolicy 'previous-policy.json'
+            # A legacy record may predate PolicyInventory. Save the inventory used to verify its policy.
+            Save-GuardReleasePolicyIdentity $state.Previous $state.OldPolicy $state.Record.PolicyInventory 'previous-policy.json'
             $taskXml=Export-ScheduledTask -TaskName $taskName -TaskPath '\' -ErrorAction Stop
             Save-GuardAdministratorJson (Join-Path $backup 'tasks.json') ([pscustomobject]@{
                 ControllerXml=$taskXml;ControllerAction=$state.ControllerAction;Notifier=$state.Notifier
@@ -694,7 +744,7 @@ $operations=@{
             }
         }
         if($NodeProfile){Save-GuardAdministratorJson (Join-Path $backup 'node-snapshot.json') $state.Profile}
-        Save-GuardReleasePolicyIdentity $state.Record $state.Policy 'candidate-policy.json'
+        Save-GuardReleasePolicyIdentity $state.Record $state.Policy $state.Record.PolicyInventory 'candidate-policy.json'
         Save-GuardAdministratorJson (Join-Path $backup 'candidate-provisioned.json') $state.Record
         Save-GuardReleaseJournal
     }
@@ -739,8 +789,15 @@ $operations=@{
         if($NodeProfile){
             $state.ProfileTouched=$true
             Save-GuardReleaseJournal
-            try{$null=& $NodeOperations.Apply $NodeProfile}
-            catch{throw 'The selected encrypted node or region settings could not be applied.'}
+            $persistLocale={param($snapshot) Save-GuardAdministratorJson (Join-Path $backup 'node-snapshot.json') $snapshot}
+            try{$null=& $NodeOperations.Apply $NodeProfile $persistLocale}
+            catch{
+                if(Set-GuardReleaseLocaleFailure $_){
+                    if($result.LocaleFailure -clike 'Windows*'){throw 'Windows locale settings could not be applied.'}
+                    throw 'Edge website language settings could not be applied.'
+                }
+                throw 'The selected encrypted node or region settings could not be applied.'
+            }
         }
         if((Read-GuardDailyRelayConfig $state.Record.Port).Hash -cne $state.Record.RouteHash){
             throw 'The persisted node does not reproduce the verified relay.'
@@ -784,13 +841,38 @@ $operations=@{
         $progress={param($Details) Send-GuardReleaseProgress 'Verify' $Details}
         $result.FreshProofs=Wait-GuardReleaseReady $state.Record $since 6 -RequireStoreWorker -Diagnostics $result.Verification -Progress $progress
         if(-not (Test-GuardReleaseIdle)){throw 'The desktop must stay closed throughout deployment.'}
+        if($NodeProfile -and $NodeOperations.Verify){
+            Send-GuardReleaseProgress 'VerifyLocale' $result.Verification
+            try{$locale=& $NodeOperations.Verify}
+            catch{
+                if(Set-GuardReleaseLocaleFailure $_){
+                    if($result.LocaleFailure -clike 'Windows*'){throw 'Windows locale settings did not pass final readback.'}
+                    throw 'Edge website language settings did not pass final readback.'
+                }
+                throw 'The selected node region settings did not pass final readback.'
+            }
+            if(-not (Test-GuardReleaseIdle)){throw 'The desktop must stay closed throughout deployment.'}
+            $result.LocaleVerification=$locale
+            $result.SiteAcceptLanguage=$locale.SiteAcceptLanguage
+            $result.BrowserStatus=$locale.BrowserStatus
+            $result.WebsiteStatus=$locale.WebsiteStatus
+            $result.AllSettingsVerified=$locale.AllSettingsVerified
+        }
     }
     Commit={[IO.File]::Delete($journalFile)}
     Restore={
+        $result.LocaleVerification=$null
+        $result.SiteAcceptLanguage=$null
+        $result.BrowserStatus=$null
+        $result.WebsiteStatus=$null
+        $result.AllSettingsVerified=$null
         Open-GuardReleaseLaunchLock
         Enter-GuardReleaseFirewallLock
         if(-not (Test-GuardReleaseIdle)){throw 'The guarded desktop must stay closed during rollback.'}
-        if($state.ControllerStopped -or $state.ControllerCreated){Stop-GuardReleaseController; Stop-GuardReleaseOwnedRelay}
+        if($state.ControllerStopped -or $state.ControllerCreated -or $state.PriorRouteUnavailable){
+            Stop-GuardReleaseController
+            Stop-GuardReleaseOwnedRelay
+        }
         if($state.NotifierTouched){Restore-GuardDailyNotifierTask $null $sid $daily}
         if(-not $state.HadStoreStage -and [IO.File]::Exists((Join-Path $root 'daily-store-stage.json'))){
             Undo-GuardDailyStoreStage $state.Record
@@ -842,19 +924,27 @@ $operations=@{
             }
             if($state.NewPolicy -and $null -ne $state.Weight){[ClaudeGuard.Network.WindowsPolicySession]::RemovePersistent($state.Policy,$state.Weight)}
             if($state.NotifierTouched){Restore-GuardDailyNotifierTask $state.Notifier $sid $daily}
-            if($state.ControllerStopped){
-                $null=Assert-GuardReleaseClosed $state.OldPolicy $state.OldWeight
+            if($state.ControllerStopped -or $state.PriorRouteUnavailable){
+                $closedRules=Assert-GuardReleaseClosed $state.OldPolicy $state.OldWeight
                 Set-GuardReleaseControllerAction $state.ControllerAction
-                if($state.ControllerAction.Execute -ieq $shell){Start-GuardReleaseRollbackRunner}
-                $since=[datetime]::UtcNow
-                Release-GuardReleaseLaunchLock
-                Exit-GuardReleaseFirewallLock
-                Start-GuardReleaseController
-                $progress={param($Details) Send-GuardReleaseProgress 'RollingBack' $Details}
-                $null=Wait-GuardReleaseReady $state.Previous $since 2 -Diagnostics $result.RestoreVerification -Progress $progress
+                if($state.PriorRouteUnavailable){
+                    $health=Join-Path $root 'daily-health.json'
+                    if(Test-Path -LiteralPath $health){Assert-GuardReleaseOwnedPath $health;[IO.File]::Delete($health)}
+                    $result.RestoreVerification.Status='Closed'
+                    $result.RestoreVerification.BootRules=$closedRules
+                }else{
+                    if($state.ControllerAction.Execute -ieq $shell){Start-GuardReleaseRollbackRunner}
+                    $since=[datetime]::UtcNow
+                    Release-GuardReleaseLaunchLock
+                    Exit-GuardReleaseFirewallLock
+                    Start-GuardReleaseController
+                    $progress={param($Details) Send-GuardReleaseProgress 'RollingBack' $Details}
+                    $null=Wait-GuardReleaseReady $state.Previous $since 2 -Diagnostics $result.RestoreVerification -Progress $progress
+                }
             }
         }
         [IO.File]::Delete($journalFile)
+        $result.RestoredClosed=$state.PriorRouteUnavailable
     }
 }
 try{

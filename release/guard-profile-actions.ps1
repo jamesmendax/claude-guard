@@ -2,9 +2,14 @@
 $packageDirectory=Join-Path (Split-Path -Parent $PSScriptRoot) 'package'
 . (Join-Path $packageDirectory 'guard-common.ps1')
 . (Join-Path $packageDirectory 'guard-node-profile.ps1')
+. (Join-Path $packageDirectory 'guard-bettbox-profile.ps1')
 . (Join-Path $packageDirectory 'guard-profile-store.ps1')
 . (Join-Path $packageDirectory 'guard-region-profile.ps1')
+. (Join-Path $packageDirectory 'guard-node-locale.ps1')
 . (Join-Path $packageDirectory 'guard-sandboxie.ps1')
+. (Join-Path $packageDirectory 'guard-windows-locale.ps1')
+. (Join-Path $packageDirectory 'guard-browser-languages.ps1')
+. (Join-Path $PSScriptRoot 'guard-site-language.ps1')
 
 function Get-GuardSettingsProbeAssets([string]$Stage){
     $runtime=Join-Path $Stage 'runtime'
@@ -86,10 +91,109 @@ function Assert-GuardSettingsPreview([pscredential]$Profile,$Proof,[datetimeoffs
     if($route.ProfileFingerprint -cne $Proof.ProfileFingerprint){throw 'The entered node has changed since the exit check.'}
 }
 
-function New-GuardSettingsNodeOperations($RegionPlan,$RegionOperations,[string]$ExpectedFingerprint){
-    $context=@{Snapshot=$null}
+function Assert-GuardSettingsCurrentBettbox([pscredential]$Profile,$Proof){
+    Assert-GuardSettingsPreview $Profile $Proof
+    $current=Get-GuardCurrentBettboxProfile
+    try{
+        if((Get-GuardNodeProfileRoute -Profile $current -Port 18881).ProfileFingerprint -cne $Proof.ProfileFingerprint){
+            throw 'The current Bettbox selection changed during the check.'
+        }
+    }finally{
+        if($current){$current.Password.Dispose()}
+    }
+}
+
+function New-GuardSettingsLocaleFailure([string]$Message,[string]$Code,[Exception]$Cause){
+    $exception=[InvalidOperationException]::new($Message,$Cause)
+    $exception.Data['GuardLocaleFailure']=$Code
+    $exception
+}
+
+function Get-GuardSettingsBrowserFailure([Exception]$Exception,[string]$Default){
+    for($cause=$Exception;$cause;$cause=$cause.InnerException){
+        switch -Exact ($cause.Message){
+            'Edge did not load the one-time local page for its language settings.' {return 'EdgeSettingsOpen'}
+            'Edge loaded the local page without exposing an identifiable settings window.' {return 'EdgeSettingsWindow'}
+            'Edge did not expose its address box in the new settings window.' {return 'EdgeSettingsWindow'}
+            'Edge lost the address in the new settings window.' {return 'EdgeSettingsPage'}
+            'Edge could not open its own settings page.' {return 'EdgeSettingsPage'}
+            'Edge did not expose its preferred-languages settings.' {return 'EdgeSettingsPage'}
+            'Edge opened a different profile. Its language settings were not changed.' {return 'EdgeProfile'}
+            'The selected Edge profile could not be verified.' {return 'EdgeProfile'}
+            'The regular Windows user token is unavailable for the Edge check.' {return 'EdgeProfile'}
+            'The Edge check requires the original user''s regular Windows session.' {return 'EdgeProfile'}
+            'Edge did not offer the requested preferred language.' {return 'EdgeLanguageUnavailable'}
+            'Edge does not allow adding a preferred language.' {return 'EdgeLanguageUnavailable'}
+            'Edge could not confirm the preferred language selection.' {return 'EdgeLanguageUnavailable'}
+            'Edge does not allow changing the preferred language order.' {return 'EdgeLanguageOrder'}
+            'Edge does not allow the requested preferred language operation.' {return 'EdgeLanguageOrder'}
+            'Edge language preferences changed during the operation.' {return 'EdgePreviewChanged'}
+            'Edge or its website language preferences changed after the preview.' {return 'EdgePreviewChanged'}
+            'Edge did not save the requested website language change.' {return 'EdgeReadback'}
+            'The local website received no verifiable request from the selected Edge browser.' {return 'EdgeSiteNoRequest'}
+            'The local website received a different preferred language from Edge.' {return 'EdgeSiteMismatch'}
+        }
+        if($cause.Message -cmatch '\AWindows could not open the regular Edge profile \([0-9]{1,6}\)\.\z'){return 'EdgeProfile'}
+    }
+    $Default
+}
+
+function Get-GuardSettingsWindowsFailure($Plan,[string]$PendingWrite){
+    if($PendingWrite -cin (Get-GuardWindowsLocaleSettings)){return 'Windows'+$PendingWrite}
+    try{
+        $current=Get-GuardWindowsLocaleState
+        if($current.OwnerSid -ceq $Plan.After.OwnerSid){
+            foreach($setting in (Get-GuardWindowsLocaleSettings)){
+                if(-not (Test-GuardWindowsLocaleSetting $current $Plan.After $setting)){return 'Windows'+$setting}
+            }
+        }
+    }catch{}
+    'WindowsReadback'
+}
+
+function Get-GuardSettingsWindowsLocaleAcceptance($Plan){
+    try{
+        $operations=New-GuardWindowsLocaleOperations
+        $independent=& $operations.ReadIndependentLanguages 0
+    }catch{
+        throw (New-GuardSettingsLocaleFailure 'Windows preferred languages did not pass independent readback.' 'WindowsLanguages' $_.Exception)
+    }
+    try{
+        $current=Get-GuardWindowsLocaleState $operations
+        $snapshot=@{Read={$current}.GetNewClosure()}
+        $matchesTarget=Test-GuardWindowsLocalePlan -Plan $Plan -Operations $snapshot
+        if($matchesTarget -and (Test-GuardWindowsIndependentLanguageOrder $independent $Plan.After $Plan.LocaleName)){
+            return @{State=$current;LanguageStatus='Verified'}
+        }
+        $matchesOriginalList=Test-GuardWindowsLocalePlan -Plan $Plan -AllowOriginalLanguages -Operations $snapshot
+        if($matchesOriginalList -and (Test-GuardWindowsIndependentLanguageOrder $independent $Plan.Before '')){
+            return @{State=$current;LanguageStatus='ManualRequired'}
+        }
+    }catch{
+        throw (New-GuardSettingsLocaleFailure 'Windows locale settings did not pass final readback.' 'WindowsReadback' $_.Exception)
+    }
+    $code=if($matchesTarget -or $matchesOriginalList){'WindowsLanguages'}else{Get-GuardSettingsWindowsFailure $Plan}
+    throw (New-GuardSettingsLocaleFailure 'Windows locale settings did not pass final readback.' $code)
+}
+
+function New-GuardSettingsNodeOperations($RegionPlan,$RegionOperations,[string]$ExpectedFingerprint,[scriptblock]$BeforeApply,
+    $WindowsLocalePlan,$BrowserLocalePlan,$BrowserTarget){
+    if($BrowserLocalePlan -and -not $WindowsLocalePlan){throw 'A Windows locale plan is required.'}
+    if(-not $BrowserTarget -and $BrowserLocalePlan){
+        $BrowserTarget=@{Profile=$BrowserLocalePlan.Profile;PrimaryLanguage=$BrowserLocalePlan.PrimaryLanguage}
+    }
+    $context=@{Snapshot=$null;BrowserStatus='ManualRequired'}
     $snapshot={
-        $context.Snapshot=[pscustomobject]@{Version=1;Node=(Get-GuardNodeStoreSnapshot);Region=$RegionPlan}
+        $saved=[ordered]@{Version=1;Node=(Get-GuardNodeStoreSnapshot);Region=$RegionPlan}
+        if($WindowsLocalePlan){
+            $saved.Version=2
+            $saved.WindowsLocale=$WindowsLocalePlan
+            $saved.BrowserLocale=$BrowserLocalePlan
+            $saved.WindowsLocaleTouched=$false
+            $saved.BrowserLocaleTouched=$false
+            $saved.WindowsPendingWrite=$null
+        }
+        $context.Snapshot=[pscustomobject]$saved
         $context.Snapshot
     }.GetNewClosure()
     # The installation backend flushes this snapshot to its protected journal before Apply.
@@ -100,23 +204,125 @@ function New-GuardSettingsNodeOperations($RegionPlan,$RegionOperations,[string]$
         }
     }.GetNewClosure()
     $apply={
-        param([pscredential]$Selection)
+        param([pscredential]$Selection,[scriptblock]$PersistProgress)
         if(-not $context.Snapshot -or -not $ExpectedFingerprint -or
             (Get-GuardNodeProfileRoute -Profile $Selection -Port 18881).ProfileFingerprint -cne $ExpectedFingerprint){
             throw 'The node does not match its protected transaction.'
         }
+        if($BeforeApply){$null=& $BeforeApply}
+        if($WindowsLocalePlan){
+            try{$windowsCurrent=Test-GuardWindowsLocalePlan -Plan $WindowsLocalePlan -Before}
+            catch{throw (New-GuardSettingsLocaleFailure 'Windows locale settings could not be applied.' 'WindowsReadback' $_.Exception)}
+            if(-not $windowsCurrent){
+                throw (New-GuardSettingsLocaleFailure 'Windows locale settings changed after the preview.' 'WindowsPreviewChanged')
+            }
+        }
         Save-GuardNodeProfile $Selection
         $null=Invoke-GuardRegionProfileChange -Plan $RegionPlan -Operations $RegionOperations -PersistUndo $persist
+        if($WindowsLocalePlan){
+            $profileSnapshot=$context.Snapshot
+            $persistWindows={
+                param([string]$Pending)
+                if($Pending){$profileSnapshot.WindowsLocaleTouched=$true}
+                $profileSnapshot.WindowsPendingWrite=$Pending
+                if($PersistProgress){$null=& $PersistProgress $profileSnapshot}
+            }.GetNewClosure()
+            try{$null=Set-GuardWindowsLocalePlan -Plan $WindowsLocalePlan -PersistWrite $persistWindows -AllowManualPreferredLanguage}
+            catch{
+                $code=Get-GuardSettingsWindowsFailure $WindowsLocalePlan $profileSnapshot.WindowsPendingWrite
+                throw (New-GuardSettingsLocaleFailure 'Windows locale settings could not be applied.' $code $_.Exception)
+            }
+            try{
+                if($BrowserLocalePlan -and (Test-GuardBrowserLanguagePlan -Plan $BrowserLocalePlan -Before)){
+                    $mode=Get-GuardBrowserLanguageApplyMode -Plan $BrowserLocalePlan
+                    if($mode -cin 'Offline','Unchanged'){
+                        if($mode -ceq 'Offline'){
+                            $profileSnapshot.BrowserLocaleTouched=$true
+                            if($PersistProgress){$null=& $PersistProgress $profileSnapshot}
+                        }
+                        $null=Set-GuardBrowserLanguagePlan -Plan $BrowserLocalePlan
+                        $context.BrowserStatus='Saved'
+                    }
+                }
+            }catch{
+                if($_.Exception.Data['GuardBrowserFailure'] -ceq 'EdgeLanguageManualRequired'){
+                    $profileSnapshot.BrowserLocaleTouched=$false
+                    if($PersistProgress){$null=& $PersistProgress $profileSnapshot}
+                }else{
+                    $code=Get-GuardSettingsBrowserFailure $_.Exception 'EdgeApply'
+                    throw (New-GuardSettingsLocaleFailure 'Edge website language settings could not be applied.' $code $_.Exception)
+                }
+            }
+        }
     }.GetNewClosure()
     $restore={
         param($saved)
-        if($saved.Version -ne 1 -or -not $saved.Node -or -not $saved.Region){throw 'Invalid protected settings recovery record.'}
+        if($saved.Version -notin 1,2 -or -not $saved.Node -or -not $saved.Region -or
+            ($saved.Version -eq 2 -and (-not $saved.WindowsLocale -or ($saved.BrowserLocaleTouched -and -not $saved.BrowserLocale)))){
+            throw 'Invalid protected settings recovery record.'
+        }
         $failed=$false
+        $preserved=$false
+        if($saved.Version -eq 2){
+            if($saved.BrowserLocaleTouched -eq $true){
+                try{$null=Restore-GuardBrowserLanguagePlan -Plan $saved.BrowserLocale}catch{$failed=$true}
+            }
+            if($saved.WindowsLocaleTouched -eq $true){
+                try{
+                    $preserved=(Restore-GuardWindowsLocalePlan -Plan $saved.WindowsLocale -PendingWrite $saved.WindowsPendingWrite) -ceq 'PreservedManualChange'
+                }catch{$failed=$true}
+            }
+        }
+        try{
+            $zone=Undo-GuardRegionProfileChange -Plan $saved.Region -Operations $RegionOperations
+            $preserved=$preserved -or $zone -ceq 'PreservedManualChange'
+        }catch{$failed=$true}
         try{Restore-GuardNodeStoreSnapshot $saved.Node}catch{$failed=$true}
-        try{$null=Undo-GuardRegionProfileChange -Plan $saved.Region -Operations $RegionOperations}catch{$failed=$true}
-        if($failed){throw 'The encrypted node or Windows time zone could not be restored.'}
+        if($failed){throw 'The encrypted node, Windows region, or Edge website languages could not be restored.'}
+        if($preserved){'PreservedManualChange'}
     }.GetNewClosure()
-    @{Snapshot=$snapshot;Apply=$apply;Restore=$restore}
+    $operations=@{Snapshot=$snapshot;Apply=$apply;Restore=$restore}
+    if($WindowsLocalePlan){
+        $operations.Verify={
+            if($RegionPlan.ProfileId -cne 'Keep'){
+                $zone=& $RegionOperations.Read
+                if($zone.Id -cne $RegionPlan.WindowsTimeZoneId -or
+                    ($RegionPlan.Changes.Count -and $zone.DaylightDisabled -ne $RegionPlan.Changes[0].After.DaylightDisabled)){
+                    throw (New-GuardSettingsLocaleFailure 'Windows time zone did not pass final readback.' 'WindowsTimeZone')
+                }
+            }
+            $windows=Get-GuardSettingsWindowsLocaleAcceptance $WindowsLocalePlan
+            $header=$null
+            if($context.BrowserStatus -ceq 'Saved'){
+                try{$browserVerified=Test-GuardBrowserLanguagePlan -Plan $BrowserLocalePlan}
+                catch{throw (New-GuardSettingsLocaleFailure 'Edge website language settings did not pass final readback.' 'EdgeReadback' $_.Exception)}
+                if(-not $browserVerified){
+                    throw (New-GuardSettingsLocaleFailure 'Edge website language settings did not pass final readback.' 'EdgeReadback')
+                }
+                try{
+                    $header=Test-GuardBrowserSiteLanguageQuiet -Plan $BrowserLocalePlan
+                    if($header -isnot [string] -or $header -cnotmatch '\A[A-Za-z0-9,;= .\-]{1,512}\z'){
+                        throw 'The saved website language sample is invalid.'
+                    }
+                }catch{
+                    if($_.Exception.Message -cne 'A recent website-language check from this Edge profile is required.'){
+                        $code=Get-GuardSettingsBrowserFailure $_.Exception 'EdgeSiteReadback'
+                        throw (New-GuardSettingsLocaleFailure 'Edge website Accept-Language did not pass final readback.' $code $_.Exception)
+                    }
+                }
+            }
+            [pscustomobject]@{
+                CountryCode=$windows.State.CountryCode;LocaleName=$windows.State.LocaleName
+                PreferredLanguages=@($windows.State.Languages | ForEach-Object LanguageTag)
+                WindowsLanguageStatus=$windows.LanguageStatus;ExpectedWindowsLanguage=$WindowsLocalePlan.LocaleName
+                BrowserLanguages=$(if($context.BrowserStatus -ceq 'Saved'){$BrowserLocalePlan.After.AcceptLanguages})
+                BrowserProfile=$BrowserTarget.Profile;ExpectedBrowserLanguage=$BrowserTarget.PrimaryLanguage
+                BrowserStatus=$context.BrowserStatus;WebsiteStatus=$(if($header){'Verified'}else{'AwaitingBrowser'})
+                AllSettingsVerified=($windows.LanguageStatus -ceq 'Verified' -and [bool]$header);SiteAcceptLanguage=$header
+            }
+        }.GetNewClosure()
+    }
+    $operations
 }
 
 function Test-GuardSetupShortcut([string]$Link,[string]$Target,[string]$Arguments){
@@ -186,6 +392,11 @@ function Install-GuardDesktopEntry {
 
 function Test-GuardSettingsInstalledVersion([string]$Stage){
     if(-not [IO.File]::Exists((Get-GuardDataPath 'daily-provisioned.json'))){return $false}
+    $target=Join-Path $Stage 'ClaudeGuardSetup.exe'
+    $actions=try{@((Get-ScheduledTask -TaskName 'ClaudeVPNGuard Daily Controller' -TaskPath '\' -ErrorAction Stop).Actions)}
+        catch{return $false}
+    if(@($actions).Count -ne 1 -or $actions[0].Execute -ine $target -or
+        $actions[0].Arguments -cne '--background-controller'){return $false}
     . (Join-Path $Stage 'release\install-guard-helpers.ps1')
     $daily=Get-GuardDataPath 'daily'
     $files=$script:GuardReleasePackageFiles+@('guard-profile-store.ps1','guard-node-profile.ps1','guard-region-profile.ps1')
@@ -203,18 +414,30 @@ function Test-GuardSettingsInstalledVersion([string]$Stage){
     $true
 }
 
-function Invoke-GuardSettingsInstall([string]$Stage,[string]$BootstrapPath,[pscredential]$Profile,$Proof,$RegionPlan,[scriptblock]$ProgressCallback){
+function Invoke-GuardSettingsInstall([string]$Stage,[string]$BootstrapPath,[pscredential]$Profile,$Proof,$RegionPlan,
+    [scriptblock]$ProgressCallback,[string]$RequirePriorGeneration,[scriptblock]$BeforeApply,$WindowsLocalePlan,$BrowserLocalePlan,$BrowserTarget){
     $options=@{Install=$true}
     if($ProgressCallback){$options.ProgressCallback=$ProgressCallback}
+    if($RequirePriorGeneration){$options.RequirePriorGeneration=$RequirePriorGeneration}
     if($Profile){
         Assert-GuardSettingsPreview $Profile $Proof
         if(-not $RegionPlan){throw 'Preview the Windows settings before applying this node.'}
+        if($WindowsLocalePlan -and ($Proof.CountryCode -cnotmatch '\A[A-Z]{2}\z' -or
+            $Proof.CountryCode -cne $WindowsLocalePlan.After.CountryCode)){
+            throw 'The verified exit country does not match the reviewed Windows locale.'
+        }
         $options.NodeProfile=$Profile
         $options.ExpectedIpv4=$Proof.ExitIpv4
-        $options.NodeOperations=New-GuardSettingsNodeOperations $RegionPlan (New-GuardWindowsRegionOperations) $Proof.ProfileFingerprint
+        $recheck={
+            Assert-GuardSettingsPreview $Profile $Proof
+            if($BeforeApply){$null=& $BeforeApply}
+        }.GetNewClosure()
+        $options.NodeOperations=New-GuardSettingsNodeOperations $RegionPlan (New-GuardWindowsRegionOperations) `
+            $Proof.ProfileFingerprint $recheck $WindowsLocalePlan $BrowserLocalePlan $BrowserTarget
         if(Test-GuardSettingsInstalledVersion $Stage){$options.RouteOnly=$true}
     }
     $install=Join-Path $Stage 'release\install-guard.ps1'
+    if($BeforeApply){$null=& $BeforeApply}
     $out=@(& $install @options)
     if($out.Count -ne 1 -or $out[0].Installed -ne $true){
         $last=$out|Select-Object -Last 1

@@ -68,6 +68,26 @@ function Get-GuardWindowStoreState($Installed,$Status){
     }catch{}
 }
 
+function Get-GuardWindowWebsiteReadback($Receipt){
+    if($Receipt.Installed -ne $true -or $Receipt.WebsiteStatus -cne 'AwaitingBrowser' -or
+        $Receipt.Operation -cnotmatch '\A[a-f0-9]{32}\z'){return $Receipt}
+    try{
+        $path=Join-Path $script:GuardWindowStage ('operations\'+$Receipt.Operation+'\website-readback.json')
+        if(-not [IO.File]::Exists($path)){return $Receipt}
+        $proof=Read-GuardDailyJsonFile $path -VerifyStatePath
+        if($proof.Version -ne 1 -or $proof.Operation -cne $Receipt.Operation -or $proof.Generation -cne $Receipt.Generation -or
+            $proof.Profile -cne $Receipt.LocaleVerification.BrowserProfile -or
+            $proof.PrimaryLanguage -cne $Receipt.LocaleVerification.ExpectedBrowserLanguage -or
+            [string]$proof.SiteAcceptLanguage -cnotmatch '\A[A-Za-z0-9,;= .\-]{1,512}\z'){return $Receipt}
+        $merged=$Receipt.PSObject.Copy()
+        $merged.WebsiteStatus='Verified'
+        $merged.BrowserStatus='Saved'
+        $merged.AllSettingsVerified=$Receipt.LocaleVerification.WindowsLanguageStatus -ceq 'Verified'
+        $merged.SiteAcceptLanguage=$proof.SiteAcceptLanguage
+        $merged
+    }catch{$Receipt}
+}
+
 function Get-GuardWindowReceipt($Installed,[bool]$RecoveryPending){
     $receipt=$script:GuardWindowLastOperation
     if(-not $receipt){
@@ -83,7 +103,7 @@ function Get-GuardWindowReceipt($Installed,[bool]$RecoveryPending){
         if($pending.Operation -ceq $receipt.Operation){return $receipt}
     }elseif($Installed.Generation -cmatch '\A[A-F0-9]{64}\z'){
         if(($receipt.Installed -eq $true -and $receipt.Generation -ceq $Installed.Generation) -or
-            ($receipt.Restored -eq $true -and $receipt.PriorGeneration -ceq $Installed.Generation)){return $receipt}
+            ($receipt.Restored -eq $true -and $receipt.PriorGeneration -ceq $Installed.Generation)){return (Get-GuardWindowWebsiteReadback $receipt)}
     }elseif(-not $Installed -and $receipt.HadPrior -eq $false -and $receipt.Restored -eq $true){$receipt}
 }
 
@@ -124,6 +144,7 @@ function Get-GuardWindowPhaseText([string]$Phase){
         'Publish' {'准备防护规则'}
         'Start' {'启动防护'}
         'Verify' {'防护验收'}
+        'VerifyLocale' {'地区和网站语言验收'}
         'Commit' {'提交变更'}
         'RollingBack' {'恢复原设置'}
         'Completed' {'变更完成'}
@@ -160,6 +181,32 @@ function Get-GuardWindowVerificationText([string]$Code){
     }
 }
 
+function Get-GuardWindowLocaleFailureText([string]$Code){
+    switch -CaseSensitive ($Code){
+        'WindowsPreviewChanged' {'Windows 地区或语言已在预览后变更。请重新核对。'}
+        'WindowsReadback' {'无法读回 Windows 地区和语言设置。'}
+        'WindowsTimeZone' {'应用后读回的 Windows 时区与预览不一致。'}
+        'WindowsHomeLocation' {'Windows 国家或地区未通过核对。'}
+        'WindowsRegionalFormat' {'Windows 区域格式未通过核对。'}
+        'WindowsLanguages' {'Windows 首选语言未通过核对。'}
+        'WindowsUiLanguageOverride' {'无法确认已保留 Windows 显示语言。'}
+        'WindowsInputMethodOverride' {'无法确认已保留 Windows 默认输入法。'}
+        'WindowsCultureFromLanguageListOptOut' {'无法确认 Windows 区域格式保持所选设置。'}
+        'EdgeApply' {'Edge 网站首选语言写入未完成。'}
+        'EdgeSettingsOpen' {'Edge 未加载 Guard 用于识别设置窗口的本地页面。'}
+        'EdgeSettingsWindow' {'无法识别这次打开的 Edge 设置窗口。'}
+        'EdgeSettingsPage' {'无法进入 Edge 首选语言设置页。'}
+        'EdgeProfile' {'无法确认已用当前 Windows 用户打开正确的 Edge 配置。'}
+        'EdgeLanguageUnavailable' {'Edge 无法添加所选的首选语言。'}
+        'EdgeLanguageOrder' {'Edge 无法调整网站语言顺序。'}
+        'EdgePreviewChanged' {'Edge 网站语言已变更。请重新核对。'}
+        'EdgeReadback' {'Edge 保存的语言列表未通过核对。'}
+        'EdgeSiteReadback' {'无法读取网站收到的 Edge 语言。'}
+        'EdgeSiteNoRequest' {'测试网页没有收到所选 Edge 发来的可核实请求。'}
+        'EdgeSiteMismatch' {'测试网页收到的 Edge 首选语言与预览不一致。'}
+    }
+}
+
 function Get-GuardWindowAdmissionText($Status){
     if($Status.CanLaunch -eq $true){return '防护已就绪。请从防护入口手动打开 Claude Desktop。'}
     switch -CaseSensitive ($Status.Reason){
@@ -179,15 +226,20 @@ function Get-GuardWindowAdmissionText($Status){
     }
 }
 
-function Get-GuardWindowSnapshot([switch]$ConfigOnly){
+function Get-GuardWindowSnapshot([switch]$ConfigOnly,[switch]$ReadLocales){
     $plan=& $script:GuardWindowInstaller -Plan
     $installed=if($plan.Mode -ceq 'Update'){try{Read-GuardDailyRecord 'daily-provisioned.json'}catch{}}
     $status=if(-not $ConfigOnly -and $installed -and -not $plan.RecoveryPending){try{Get-GuardDailyStatus}catch{}}
     if($status.Generation -and $status.Generation -cne $installed.Generation){$status=$null}
     $zone=Get-GuardWindowRegionState
     $entry=if(-not $ConfigOnly -and $installed){Get-GuardWindowEntry}
+    if($ReadLocales -or (-not $ConfigOnly -and -not $plan.RecoveryPending)){
+        $windowsLocale=try{Get-GuardWindowsLocaleState}catch{}
+        $browserLocale=try{Get-GuardBrowserLanguageState}catch{}
+    }
     @{
         Mode=$plan.Mode;RecoveryPending=($plan.RecoveryPending -eq $true);Installed=$installed;Status=$status;Zone=$zone
+        WindowsLocale=$windowsLocale;BrowserLocale=$browserLocale
         ExitIpv4=(ConvertTo-GuardWindowIpv4 $installed.ExpectedIpv4);GuardedEntry=$entry
         Receipt=$(if(-not $ConfigOnly){Get-GuardWindowReceipt $installed $plan.RecoveryPending})
         Worker=$(if(-not $ConfigOnly -and -not $plan.RecoveryPending){Get-GuardWindowStoreState $installed $status})
@@ -196,11 +248,12 @@ function Get-GuardWindowSnapshot([switch]$ConfigOnly){
 }
 
 function New-GuardWindowCheck([string]$Key,[string]$Group,[string]$Label,[string]$Current,
-    [string]$Expected,[string]$Status,[string]$Detail,[switch]$Change,[switch]$Blocks){
+    [string]$Expected,[string]$Status,[string]$Detail,[switch]$Change,[switch]$Blocks,[string]$VerificationTarget,[string]$Operation){
     @{
         Key=$Key;Group=$Group;Label=$Label;Current=$Current;Expected=$Expected;Status=$Status;Detail=$Detail
         Issue=$Status -cin 'blocked','choice','stale','failed','review','attention','paused'
         Change=($Change.IsPresent -or $Status -cin 'change','applied');Blocks=$Blocks.IsPresent
+        VerificationTarget=$VerificationTarget;Operation=$Operation
     }
 }
 
@@ -244,7 +297,67 @@ function Get-GuardWindowChecks($Snapshot,$Candidate){
 
     $zoneDetail=if($Candidate.RequiresChoice){$Candidate.Message}else{'时区设置影响整台电脑。选择保留或当前时区时，沿用现有设置。'}
     New-GuardWindowCheck 'windows-zone' 'settings' 'Windows 时区' $beforeZone $afterZone $zoneStatus $zoneDetail `
-        -Blocks:($isPlan -and $Candidate.RequiresChoice -and $null -ne $proof)
+        -Blocks:($isPlan -and $Candidate.RequiresChoice -and $null -ne $proof) `
+        -VerificationTarget $(if($isPlan -and $region){$targetZone.Id})
+
+    $windows=$Snapshot.WindowsLocale
+    $windowsAfter=$Candidate.WindowsLocalePlan.After
+    $browser=$Snapshot.BrowserLocale
+    $browserAfter=$Candidate.BrowserLocalePlan.After
+    $browserPending=-not $isPlan -and $receipt.Installed -eq $true -and $receipt.WebsiteStatus -ceq 'AwaitingBrowser'
+    $windowsLanguagePending=-not $isPlan -and $receipt.Installed -eq $true -and $receipt.LocaleVerification.WindowsLanguageStatus -ceq 'ManualRequired'
+    $format=[string]$windows.LocaleName
+    $formatAfter=[string]$windowsAfter.LocaleName
+    if($windows.Format.ShortDate){$format+=" · $($windows.Format.ShortDate) $($windows.Format.ShortTime)"}
+    if($windowsAfter.Format.ShortDate){$formatAfter+=" · $($windowsAfter.Format.ShortDate) $($windowsAfter.Format.ShortTime)"}
+    $localeRows=@(
+        @{Key='windows-home-region';Label='Windows 国家或地区';Current=$windows.CountryCode;Expected=$windowsAfter.CountryCode
+            Target=$Candidate.LocaleTarget.CountryCode
+            Detail='对应 Windows「语言和区域」中的国家或地区。'}
+        @{Key='windows-regional-format';Label='Windows 区域格式';Current=$format;Expected=$formatAfter;Target=$Candidate.LocaleTarget.LocaleName
+            Detail='Windows 使用这个区域格式来显示日期、时间和数字。'}
+        @{Key='windows-preferred-languages';Label='Windows 首选语言'
+            Current=(@($windows.Languages | ForEach-Object LanguageTag) -join ', ')
+            Expected=(@($windowsAfter.Languages | ForEach-Object LanguageTag) -join ', ')
+            Target=$Candidate.LocaleTarget.LanguageTag
+            Detail='目标语言排在首位。现有显示语言和默认输入法会保留。'}
+        @{Key='edge-website-languages';Label='Edge 网站首选语言';Current=[string]$browser.AcceptLanguages;Expected=[string]$browserAfter.AcceptLanguages
+            Target=$Candidate.BrowserTarget.PrimaryLanguage
+            Detail='目标语言排在首位。应用后会用真实 Edge 请求核对网站收到的 Accept-Language。'}
+    )
+    foreach($row in $localeRows){
+        $browserRow=$row.Key -ceq 'edge-website-languages'
+        $windowsPreferredRow=$row.Key -ceq 'windows-preferred-languages'
+        if($windowsPreferredRow -and $windowsLanguagePending){
+            $row.Target=$receipt.LocaleVerification.ExpectedWindowsLanguage
+            $row.Expected=$row.Target
+            $row.Detail='请打开 Windows 首选语言，把目标语言移到首位，再重新核对。'
+        }
+        if($browserRow -and $browserPending){
+            $row.Target=$receipt.LocaleVerification.ExpectedBrowserLanguage
+            $row.Expected=$row.Target
+        }
+        $message=if($browserRow -and $Candidate.BrowserMessage){$Candidate.BrowserMessage}else{$Candidate.LocaleMessage}
+        $blocks=$isPlan -and $proof -and -not $row.Expected -and -not ($browserRow -and $Candidate.LocaleTarget)
+        $settingStatus=if($blocks -and $Candidate.LocaleStatus -ceq 'choice'){'choice'}elseif($blocks){'blocked'}
+            elseif($browserRow -and ($message -or $browserPending)){'review'}
+            elseif($windowsPreferredRow -and $windowsLanguagePending){'review'}
+            elseif(-not $row.Current){'uncollected'}elseif($row.Expected -and $row.Current -cne $row.Expected){'change'}else{'kept'}
+        $before=if($row.Current){$row.Current}else{'未读取'}
+        $after=if($row.Expected){$row.Expected}elseif($row.Target){$row.Target}elseif($isPlan){'待确定'}else{$before}
+        if(-not $message -or (-not $blocks -and -not $browserRow)){$message=$row.Detail}
+        New-GuardWindowCheck $row.Key 'settings' $row.Label $before $after $settingStatus $message `
+            -Blocks:$blocks -VerificationTarget $row.Target -Operation $(if($browserRow -and $browserPending){$receipt.Operation})
+    }
+
+    $header=[string]$receipt.SiteAcceptLanguage
+    $headerVerified=$receipt.Installed -eq $true -and $header -cmatch '\A[A-Za-z0-9,;= .\-]{1,512}\z'
+    $siteCurrent=if(-not $isPlan -and $headerVerified){$header}else{'待核对'}
+    $siteLanguageTarget=if($browserPending){$receipt.LocaleVerification.ExpectedBrowserLanguage}else{$Candidate.BrowserTarget.PrimaryLanguage}
+    $siteTarget=if($siteLanguageTarget){$siteLanguageTarget+' 排在首位'}else{'目标网站语言排在首位'}
+    New-GuardWindowCheck 'edge-site-readback' 'protection' 'Edge 发送给网站的语言' $siteCurrent $siteTarget `
+        $(if(-not $isPlan -and $headerVerified){'ok'}else{'waiting'}) '记录来自测试网页实际收到的 Accept-Language。' `
+        -VerificationTarget $siteLanguageTarget -Operation $(if($browserPending){$receipt.Operation})
 
     $daylightNow=Get-GuardWindowDaylight $zone $Snapshot.Zone.DaylightDisabled
     $daylightThen=if($zoneChange){Get-GuardWindowDaylight $targetZone $false}elseif($Candidate.RequiresChoice){'随所选时区确定'}else{$daylightNow}
@@ -320,8 +433,8 @@ function Get-GuardWindowChecks($Snapshot,$Candidate){
         switch -CaseSensitive ($proof.CountryCode){'JP' {'日本（JP）'} 'US' {'美国（US）'} default {$proof.CountryCode}}
     }elseif($isPlan -and -not $proof){'待试测'}else{'未读取'}
     $countryStatus=if($Candidate.CountryMismatch){'failed'}elseif($proof.CountryCode){'ok'}elseif($isPlan -and -not $proof){'pending'}else{'missing'}
-    New-GuardWindowCheck 'country' 'protection' '出口国家' $country '用于时区选择' $countryStatus `
-        '部分查询只返回公网 IPv4。缺少国家时，可手选 Windows 时区或保留当前时区。' -Blocks:($Candidate.CountryMismatch -eq $true)
+    New-GuardWindowCheck 'country' 'protection' '出口国家' $country '用于选择时区、地区和语言' $countryStatus `
+        '本次应用需要从试测结果核实出口国家。' -Blocks:($Candidate.CountryMismatch -eq $true -or ($isPlan -and $proof -and -not $proof.CountryCode))
 
     $permitText=if($pending){'等待恢复，暂不可从防护入口打开'}elseif($ready){'当前联网许可有效'}
         elseif($status.Gate -ceq 'Closed'){'联网许可已关闭'}elseif($status.Gate -ceq 'Closing'){'正在关闭联网许可'}else{'待核对'}
@@ -355,14 +468,20 @@ function Get-GuardWindowChecks($Snapshot,$Candidate){
     New-GuardWindowCheck 'offset' 'environment' '时区偏移' $offset `
         $(if($Candidate.RequiresChoice){'按所选时区确定'}else{Get-GuardWindowOffset $targetZone $targetDisabled $now}) `
         $(if($offset.StartsWith('UTC')){'derived'}else{'uncollected'}) '按当前日期、Windows 时区和夏令时设置计算。'
-    New-GuardWindowCheck 'windows-locale' 'environment' 'Windows 语言、键盘和区域格式' '未采集' '沿用 Windows 设置' 'uncollected' `
-        '系统显示语言、键盘和区域格式由 Windows 单独管理。'
+    $displayLanguage=if($windows.EffectiveUiLanguage){$windows.EffectiveUiLanguage}else{'未读取'}
+    $inputMethod=if($windows.EffectiveInputMethod){$windows.EffectiveInputMethod}else{'未读取'}
+    New-GuardWindowCheck 'windows-locale' 'environment' 'Windows 显示语言和默认输入法' "$displayLanguage · $inputMethod" '沿用当前设置' `
+        $(if($windows){'reference'}else{'uncollected'}) '应用地区和首选语言时，保留当前显示语言和默认输入法。'
     $browserItems=[ordered]@{
-        language='浏览器语言';fonts='浏览器可用字体';intl='Intl 区域格式';emoji='Emoji 渲染'
+        language='浏览器显示语言';fonts='浏览器可用字体';intl='Intl 区域格式';emoji='Emoji 渲染'
         'claude-exits'='Claude 域名出口';dns='DNS 解析出口';webrtc='WebRTC 浏览器通道'
     }
     foreach($key in $browserItems.Keys){
-        New-GuardWindowCheck $key 'environment' $browserItems[$key] '未采集' '浏览器单独核对' 'uncollected' `
-            '这是 IPPure 网页的参考项目。Guard 会单独核对自己的专用线路。'
+        if($key -ceq 'language' -and $browser.DisplayLocale){
+            New-GuardWindowCheck $key 'environment' $browserItems[$key] $browser.DisplayLocale '沿用当前设置' 'reference' '这是 Edge 菜单使用的语言。'
+        }else{
+            New-GuardWindowCheck $key 'environment' $browserItems[$key] '未采集' '浏览器单独核对' 'uncollected' `
+                '这是 IPPure 网页的参考项目。Guard 会单独核对自己的专用线路。'
+        }
     }
 }

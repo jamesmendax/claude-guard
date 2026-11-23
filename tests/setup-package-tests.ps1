@@ -39,10 +39,10 @@ try{
     Assert-SetupPackage ([BitConverter]::ToUInt16($image,$pe+4) -eq 0x8664 -and
         [BitConverter]::ToUInt16($image,$pe+24+68) -eq 2) 'the native executable is x64 with the GUI subsystem'
     $assembly=[Reflection.Assembly]::ReflectionOnlyLoad($image)
-    Assert-SetupPackage ($assembly.GetName().Version -eq [version]'1.0.1.0' -and
+    Assert-SetupPackage ($assembly.GetName().Version -eq [version]'1.0.4.0' -and
         $assembly.GetManifestResourceNames() -ccontains 'Guard.SetupWindow' -and
         $assembly.GetReferencedAssemblies().Name -ccontains 'PresentationFramework' -and
-        $assembly.GetReferencedAssemblies().Name -ccontains 'System.Management.Automation') 'the 1.0.1 host embeds WPF and uses the Windows PowerShell engine in-process'
+        $assembly.GetReferencedAssemblies().Name -ccontains 'System.Management.Automation') 'the 1.0.4 host embeds WPF and uses the Windows PowerShell engine in-process'
     $hostType=[Reflection.Assembly]::Load($image).GetType('GuardSetup',$true)
     $flags=[Reflection.BindingFlags]'Static,NonPublic'
     $encode=$hostType.GetMethod('WindowFailureRecord',$flags)
@@ -94,7 +94,8 @@ try{
     Assert-SetupPackage ((Get-FileHash -LiteralPath (Join-Path $extracted 'runtime/guard-dedicated-relay.exe')).Hash -ceq 'CF894375DBC00AB6708C1314AC35BBD29059F4C37F315353AACA7F1A9C566DE6' -and
         (Get-FileHash -LiteralPath (Join-Path $extracted 'runtime/guard-exit-observer.exe')).Hash -ceq '86FC4785327DB5F5C7558DC6156C543B433C313E813A222E088086222AB4AFA6') 'the embedded relay and Node executable match the selected vendor releases'
     $expected='release/guard-window-actions.ps1','release/guard-window-evidence.ps1','release/guard-profile-actions.ps1','release/install-guard.ps1',
-        'release/guard-region-zones.json','release/Unicode-Data-License.txt',
+        'release/guard-region-zones.json','release/guard-site-language.ps1','release/guard-user-region.ps1','release/Unicode-Data-License.txt',
+        'package/guard-node-locale.ps1','package/guard-windows-locale.ps1','package/guard-browser-languages.ps1',
         'package/guard-region-profile.ps1','package/guard-node-profile.ps1','package/guard-profile-store.ps1',
         'runtime/cloudflare-exit-probe.mjs','licenses/Node-LICENSE.txt','licenses/GPL-3.0.txt','licenses/THIRD-PARTY-NOTICES.md'
     foreach($relative in $expected){if(-not (Test-Path -LiteralPath (Join-Path $extracted $relative) -PathType Leaf)){throw "Expected $relative."}}
@@ -135,7 +136,7 @@ try{
     if($ReferenceSetupPath){
         $reference=(Get-Item -LiteralPath $ReferenceSetupPath -ErrorAction Stop).FullName
         Assert-SetupPackage ((Get-FileHash -LiteralPath $reference).Hash -ceq (Get-FileHash -LiteralPath $setup).Hash) 'independent builds produce byte-identical installer executables'
-        $sourceName='ClaudeGuardSetup-1.0.1-sources.zip'
+        $sourceName='ClaudeGuardSetup-1.0.4-sources.zip'
         $sources=Join-Path (Split-Path -Parent $setup) $sourceName
         $referenceSources=Join-Path (Split-Path -Parent $reference) $sourceName
         Assert-SetupPackage ((Get-FileHash -LiteralPath $sources).Hash -ceq (Get-FileHash -LiteralPath $referenceSources).Hash) 'independent builds produce byte-identical source archives'

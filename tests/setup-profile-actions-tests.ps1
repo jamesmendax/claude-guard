@@ -63,6 +63,11 @@ try{
     $regionOps=@{Read={ [pscustomobject]@{Id=$testState.Id;DaylightDisabled=$testState.DaylightDisabled;AutomaticTimeZoneEnabled=$false} }
         Write={param($target)$testState.Id=$target.Id;$testState.DaylightDisabled=$target.DaylightDisabled;$testState.Writes++}}
     $plan=New-GuardRegionProfilePlan -ProfileId Japan -Operations $regionOps
+    $rejected=New-GuardSettingsNodeOperations $plan $regionOps $route.ProfileFingerprint {throw 'Fixture selection changed'}
+    $null=& $rejected.Snapshot
+    Reject {& $rejected.Apply $profile} 'A changed source selection blocks the final protected apply'
+    Require ($testState.Store -ceq 'previous' -and $testState.Id -ceq 'Pacific Standard Time' -and $testState.Writes -eq 0) `
+        'A failed source recheck leaves the node and Windows time zone untouched'
     $ops=New-GuardSettingsNodeOperations $plan $regionOps $route.ProfileFingerprint
     Reject {& $ops.Apply $profile} 'The private node cannot change before a rollback snapshot exists'
     $saved=& $ops.Snapshot
@@ -76,6 +81,140 @@ try{
     $null=& $unchanged.Snapshot
     & $unchanged.Apply $profile
     Require ($testState.Writes -eq 2) 'Choosing the current time zone does not write Windows settings'
+
+    $testState.Store='previous'
+    $testState.WindowsLocale='en-US'
+    $testState.WindowsPreferred='en-US'
+    $testState.BrowserLocale='en-US,en'
+    $windowsLocale=[pscustomobject]@{LocaleName='ja-JP';Before=@{LocaleName='en-US';Languages=@(@{LanguageTag='en-US'})}
+        After=@{CountryCode='JP';LocaleName='ja-JP';Languages=@(@{LanguageTag='ja-JP'})}}
+    $browserLocale=[pscustomobject]@{Changed=$true;Profile='Default';PrimaryLanguage='ja'
+        Before=@{AcceptLanguages='en-US,en'};After=@{AcceptLanguages='ja,en-US,en'}}
+    function New-GuardWindowsLocaleOperations {
+        @{
+            Read={[pscustomobject]@{LocaleName=$testState.WindowsLocale;CountryCode='JP';Languages=@(@{LanguageTag=$testState.WindowsPreferred})}}
+            ReadIndependentLanguages={
+                param($Delay)
+                $testState.IndependentLanguageReads++
+                if($testState.IndependentLanguage){$testState.IndependentLanguage}else{$testState.WindowsPreferred}
+            }
+        }
+    }
+    function Get-GuardWindowsLocaleState($Operations){& $Operations.Read}
+    function Test-GuardWindowsIndependentLanguageOrder($Actual,$Expected,$Target){$Actual -ceq $Expected.Languages[0].LanguageTag}
+    function Test-GuardWindowsLocalePlan($Plan,[switch]$Before,[switch]$AllowOriginalLanguages,$Operations){
+        if(-not $Operations){$Operations=New-GuardWindowsLocaleOperations}
+        $observed=& $Operations.Read
+        $locale=if($Before){$Plan.Before.LocaleName}else{$Plan.After.LocaleName}
+        $language=if($Before -or $AllowOriginalLanguages){$Plan.Before.Languages[0].LanguageTag}else{$Plan.After.Languages[0].LanguageTag}
+        $observed.LocaleName -ceq $locale -and $observed.Languages[0].LanguageTag -ceq $language
+    }
+    function Set-GuardWindowsLocalePlan($Plan,[scriptblock]$PersistWrite,[switch]$AllowManualPreferredLanguage){
+        & $PersistWrite 'RegionalFormat'
+        $testState.WindowsLocale=$Plan.After.LocaleName
+        $testState.WindowsPreferred=$Plan.After.Languages[0].LanguageTag
+        & $PersistWrite $null
+    }
+    function Restore-GuardWindowsLocalePlan($Plan,[string]$PendingWrite){
+        $testState.WindowsLocale=$Plan.Before.LocaleName
+        $testState.WindowsPreferred=$Plan.Before.Languages[0].LanguageTag
+    }
+    function Set-GuardBrowserLanguagePlan($Plan){
+        $testState.BrowserLocale=$Plan.After.AcceptLanguages
+        if($testState.FailBrowserApply){throw 'A browser write stopped after the value changed.'}
+    }
+    function Test-GuardBrowserLanguagePlan($Plan,[switch]$Before){
+        $testState.BrowserLocale -ceq $(if($Before){$Plan.Before.AcceptLanguages}else{$Plan.After.AcceptLanguages})
+    }
+    function Get-GuardBrowserLanguageApplyMode($Plan){if($testState.BrowserBusy){'ManualRequired'}else{'Offline'}}
+    function Test-GuardBrowserSiteLanguageQuiet($Plan){
+        if($testState.NoRecentHeader){throw 'A recent website-language check from this Edge profile is required.'}
+        if($testState.FailHeader){throw 'The local website received a different preferred language from Edge.'}
+        'ja,en-US;q=0.9,en;q=0.8'
+    }
+    function Restore-GuardBrowserLanguagePlan($Plan){
+        if($testState.FailBrowserRestore){throw 'The profile could not be restored on this attempt.'}
+        $testState.BrowserLocale=$Plan.Before.AcceptLanguages
+    }
+    $full=New-GuardSettingsNodeOperations $plan $regionOps $route.ProfileFingerprint -WindowsLocalePlan $windowsLocale -BrowserLocalePlan $browserLocale
+    $snapshot=& $full.Snapshot
+    $copy=($snapshot | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    Require ($copy.Version -eq 2 -and $copy.WindowsLocale.Before.LocaleName -ceq 'en-US' -and
+        $copy.BrowserLocale.Before.AcceptLanguages -ceq 'en-US,en') 'The protected prewrite snapshot keeps both locale plans for later recovery'
+    $testState.WindowsLocale='fr-FR'
+    Reject {& $full.Apply $profile} 'A stale Windows locale preview stops before writing the node or browser'
+    Require ($testState.Store -ceq 'previous' -and $testState.BrowserLocale -ceq 'en-US,en') 'A stale locale plan leaves the other saved settings untouched'
+    $testState.WindowsLocale='en-US'
+    $testState.BrowserBusy=$true
+    $null=& $full.Apply $profile
+    $manual=& $full.Verify
+    Require ($testState.WindowsLocale -ceq 'ja-JP' -and $testState.BrowserLocale -ceq 'en-US,en' -and
+        $manual.BrowserStatus -ceq 'ManualRequired' -and $manual.WebsiteStatus -ceq 'AwaitingBrowser' -and
+        -not $manual.AllSettingsVerified -and -not $manual.SiteAcceptLanguage) 'A busy Edge profile is untouched while the other settings are accepted'
+    & $full.Restore $snapshot
+    $testState.BrowserBusy=$false
+    $snapshot=& $full.Snapshot
+    $testState.BrowserLocale='en-GB,en'
+    $null=& $full.Apply $profile
+    $manual=& $full.Verify
+    Require ($manual.BrowserStatus -ceq 'ManualRequired' -and $testState.BrowserLocale -ceq 'en-GB,en') 'A stale Edge plan preserves changes that appeared after review'
+    & $full.Restore $snapshot
+    $testState.BrowserLocale='en-US,en'
+    $snapshot=& $full.Snapshot
+    $testState.FailBrowserApply=$true
+    $persist={
+        param($progressSnapshot)
+        $testState.ProgressSnapshots+=,($progressSnapshot | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+    }
+    $applyError=$null
+    try{$null=& $full.Apply $profile $persist}catch{$applyError=$_.Exception}
+    Require ($applyError.Message -ceq 'Edge website language settings could not be applied.' -and
+        $applyError.Data['GuardLocaleFailure'] -ceq 'EdgeApply' -and $testState.BrowserLocale -ceq 'ja,en-US,en') `
+        'An unclassified partial browser write reports only its step and stops the transaction'
+    Require ($testState.ProgressSnapshots.Count -eq 3 -and
+        $testState.ProgressSnapshots[0].WindowsPendingWrite -ceq 'RegionalFormat' -and
+        $testState.ProgressSnapshots[0].WindowsLocaleTouched -and -not $testState.ProgressSnapshots[0].BrowserLocaleTouched -and
+        $testState.ProgressSnapshots[2].BrowserLocaleTouched) 'Protected progress records identify partial writes before each locale mutation'
+    $copy=$testState.ProgressSnapshots[-1]
+    $testState.FailBrowserRestore=$true
+    Reject {& $full.Restore $copy} 'Failed browser recovery leaves the installer able to retry its protected snapshot'
+    Require ($testState.Store -ceq 'previous' -and $testState.Id -ceq 'Pacific Standard Time' -and
+        $testState.WindowsLocale -ceq 'en-US') 'Recovery attempts all prior settings even when restoring the browser fails'
+    $testState.FailBrowserRestore=$false
+    $testState.FailBrowserApply=$false
+    $recovery=New-GuardSettingsNodeOperations $null $regionOps ''
+    & $recovery.Restore $copy
+    Require ($testState.BrowserLocale -ceq 'en-US,en') 'A new recovery process can restore the serialized Edge website language settings'
+    $null=& $full.Snapshot
+    $null=& $full.Apply $profile
+    $testState.NoRecentHeader=$true
+    $unverified=& $full.Verify
+    Require ($unverified.BrowserStatus -ceq 'Saved' -and $unverified.WebsiteStatus -ceq 'AwaitingBrowser' -and
+        -not $unverified.SiteAcceptLanguage -and -not $unverified.AllSettingsVerified) 'Saved Edge settings still require a real website sample'
+    $testState.NoRecentHeader=$false
+    $testState.FailHeader=$true
+    $verifyError=$null
+    try{$null=& $full.Verify}catch{$verifyError=$_.Exception}
+    Require ($verifyError.Message -ceq 'Edge website Accept-Language did not pass final readback.' -and
+        $verifyError.Data['GuardLocaleFailure'] -ceq 'EdgeSiteMismatch') `
+        'A mismatched real website request fails final verification and reports the specific step'
+    $testState.FailHeader=$false
+    $verified=& $full.Verify
+    Require ($verified.SiteAcceptLanguage -ceq 'ja,en-US;q=0.9,en;q=0.8' -and $verified.CountryCode -ceq 'JP' -and
+        $verified.PreferredLanguages[0] -ceq 'ja-JP' -and $verified.WindowsLanguageStatus -ceq 'Verified' -and $verified.AllSettingsVerified) `
+        'Successful verification supplies the measured site header and independently read-back Windows language'
+    $testState.WindowsPreferred='en-US'
+    $reads=$testState.IndependentLanguageReads
+    $manual=& $full.Verify
+    Require ($testState.IndependentLanguageReads -eq $reads+1 -and $manual.WindowsLanguageStatus -ceq 'ManualRequired' -and
+        $manual.PreferredLanguages[0] -ceq 'en-US' -and $manual.LocaleName -ceq 'ja-JP' -and $manual.SiteAcceptLanguage -and -not $manual.AllSettingsVerified) `
+        'A reverted Windows list makes the full receipt partial while independent region and website evidence remain valid'
+    $testState.WindowsPreferred='ja-JP'
+    $testState.IndependentLanguage='en-US'
+    $verifyError=$null
+    try{$null=& $full.Verify}catch{$verifyError=$_.Exception}
+    Require ($verifyError.Data['GuardLocaleFailure'] -ceq 'WindowsLanguages') `
+        'Cached Windows language cannot override a disagreeing independent readback'
 
     $local=@([pscustomobject]@{Name='Teredo Tunneling Pseudo-Interface';InterfaceType=131;InterfaceGuid=[guid]::NewGuid();ifIndex=7;NetLuid=1402},
         [pscustomobject]@{Name='Bettbox';InterfaceGuid=[guid]::NewGuid();ifIndex=8;NetLuid=1102})

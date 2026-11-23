@@ -1,6 +1,6 @@
 ﻿#Requires -Version 5.1
 [CmdletBinding()]
-param([string]$PreviewDirectory)
+param([string]$PreviewDirectory,[switch]$PrivateDesktop)
 
 $ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $PSScriptRoot
@@ -18,6 +18,9 @@ using System;
 using System.Collections;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
@@ -26,19 +29,20 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
-internal interface IGuardSetupActions
-{
-    IDictionary Home(); IDictionary Probe(string node, CancellationToken token); IDictionary Region(string zoneId);
-    IDictionary Update(); IDictionary Apply(string zoneId); IDictionary Recover(); IDictionary Progress(); void ClearPreview();
-}
-
 internal sealed class FakeSetup : IGuardSetupActions
 {
-    internal bool Installed, Pending, FailUpdate, FailApply, SlowProbe, WindowError, Expired, BlockApply;
-    internal volatile int Updates, Probes, Clears, Recoveries;
+    internal bool Installed, Pending, FailUpdate, FailApply, SlowProbe, WindowError, Expired, BlockApply, RequireLocale, ManualFallback, UserRegionFallback, ManualWindows;
+    internal volatile int Updates, Probes, Clears, Recoveries, CurrentApplies, CurrentProbes;
     internal readonly ManualResetEventSlim PermitUpdate = new ManualResetEventSlim();
     internal string AppliedZone;
+    internal string AppliedLocale;
+    internal string CurrentTarget;
     internal string StopKind;
+    internal readonly ArrayList ManualOpens = ArrayList.Synchronized(new ArrayList());
+    internal volatile int ManualChecks, ManualConfirms;
+    internal string CheckedSetting;
+    internal string UserRegionTarget;
+    internal volatile int UserRegionCalls;
     private readonly int ui = Thread.CurrentThread.ManagedThreadId;
 
     private void AssertWorker()
@@ -52,6 +56,8 @@ internal sealed class FakeSetup : IGuardSetupActions
         return new Hashtable { { "Mode", Installed ? "Update" : "Fresh" }, { "RecoveryPending", Pending }, { "Ready", Installed },
             { "NodeLabel", Installed ? "Bettbox · 美国西部" : "" }, { "ExitIpv4", Installed ? "198.51.100.17" : "" },
             { "TimeZone", "美国西部 · 洛杉矶" }, { "Version", "1.0.1" }, { "GuardedEntry", Installed ? "Desktop" : "" },
+            { "WindowsHomeRegion", "CA" }, { "WindowsRegionalFormat", "fr-CA" },
+            { "WindowsPreferredLanguages", "fr-CA, en-US" }, { "EdgePreferredLanguages", "fr,en-US,en" },
             { "LastStop", StopRecord() }, { "LastWindowError", WindowError ? new Hashtable {
                 { "HasRecord", true }, { "TimeUtc", "2026-11-23T09:07:02Z" }, { "Title", "设置窗口意外退出" },
                 { "Summary", "上次打开设置时发生错误。" }, { "Source", "Guard 设置窗口错误记录" }, { "HResult", "0x80004005" }
@@ -113,17 +119,47 @@ internal sealed class FakeSetup : IGuardSetupActions
             { "ExpiresUtc", DateTimeOffset.UtcNow.AddSeconds(Expired ? -1 : 300).ToString("o") } };
     }
 
-    public IDictionary Region(string zoneId)
+    public IDictionary ProbeCurrentNode(CancellationToken token)
     {
         AssertWorker();
-        if (zoneId == "Automatic") return new Hashtable { { "RequiresChoice", true }, { "Message", "请选择城市。" } };
+        CurrentProbes++;
+        token.ThrowIfCancellationRequested();
+        return new Hashtable { { "Ok", true }, { "ExitIpv4", "203.0.113.28" }, { "CountryCode", RequireLocale ? "CA" : "JP" },
+            { "ExpiresUtc", DateTimeOffset.UtcNow.AddSeconds(300).ToString("o") } };
+    }
+
+    public IDictionary Region(string zoneId, string localeName)
+    {
+        AssertWorker();
+        if (ManualFallback)
+        {
+            Hashtable[] checks = {
+                ManualCheckRow("node", "Guard 选定节点", "当前 Bettbox 节点", ""),
+                ManualCheckRow("allowed-ip", "允许的出口 IPv4", "203.0.113.28", ""),
+                ManualCheckRow("windows-zone", "Windows 时区", "东京", "Tokyo Standard Time"),
+                ManualCheckRow("windows-home-region", "Windows 国家或地区", "JP", "JP"),
+                ManualCheckRow("windows-regional-format", "Windows 区域格式", "ja-JP", "ja-JP"),
+                ManualCheckRow("windows-preferred-languages", "Windows 首选语言", "ja-JP", "ja-JP"),
+                ManualCheckRow("edge-website-languages", "Edge 网站首选语言", "ja", "ja")
+            };
+            checks[2]["Blocks"] = BlockApply;
+            return new Hashtable { { "RequiresChoice", BlockApply }, { "TimeZone", BlockApply ? "" : "东京" }, { "Checks", checks } };
+        }
+        if (zoneId == "Automatic" && CurrentProbes == 0) return new Hashtable { { "RequiresChoice", true }, { "Message", "请选择城市。" } };
         var exit = Check("exit", "settings", "允许的出口 IPv4", "198.51.100.17", "203.0.113.28", "change",
             "Guard 会用本次试测的出口。", false, true);
         var worker = Check("worker", "protection", "商店版监控", "待核对", "持续守护", "attention",
             "应用变更后核对。", true, false);
-        worker["Blocks"] = BlockApply;
-        return new Hashtable { { "RequiresChoice", false }, { "TimeZone", zoneId == "Japan" ? "日本 · 东京" : "美国西部 · 洛杉矶" },
-            { "Checks", new[] { exit, worker } } };
+        worker["Blocks"] = BlockApply || (RequireLocale && String.IsNullOrEmpty(localeName));
+        return new Hashtable { { "RequiresChoice", false }, { "TimeZone", zoneId == "Japan" || CurrentProbes > 0 ? "日本 · 东京" : "美国西部 · 洛杉矶" },
+            { "Checks", new[] { exit, worker } }, { "LocaleChoices", RequireLocale ? new[] { "en-CA", "fr-CA" } : null } };
+    }
+
+    private static Hashtable ManualCheckRow(string key, string label, string target, string verificationTarget)
+    {
+        Hashtable row = Check(key, "settings", label, "原值", target, "review", "此项可手动更改。", true, true);
+        row["VerificationTarget"] = verificationTarget;
+        return row;
     }
 
     public IDictionary Update()
@@ -136,14 +172,34 @@ internal sealed class FakeSetup : IGuardSetupActions
             : new Hashtable { { "Success", true }, { "GuardedEntry", "Desktop" } };
     }
 
-    public IDictionary Apply(string zoneId)
+    public IDictionary Apply(string zoneId, string localeName)
     {
         AssertWorker();
         AppliedZone = zoneId;
+        AppliedLocale = localeName;
         if (FailApply)
             return new Hashtable { { "Success", false }, { "Restored", true }, { "HadPrior", false }, { "Message", "测试安装失败。" } };
         Installed = true;
-        return new Hashtable { { "Success", true }, { "GuardedEntry", "StartMenu" } };
+        if (ManualFallback)
+            return new Hashtable { { "Success", true }, { "GuardedEntry", "StartMenu" }, { "WebsiteStatus", "AwaitingBrowser" },
+                { "BrowserStatus", "ManualRequired" }, { "AllSettingsVerified", false },
+                { "Message", ManualWindows ? "Windows 首选语言需手动调整。Edge 待核对。" : "防护验收通过，Edge 待核对。" },
+                { "WindowsLanguageStatus", ManualWindows ? "ManualRequired" : "Verified" }, { "Operation", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+                { "ManualKeys", ManualWindows ? new[] { "windows-preferred-languages", "edge-website-languages" } : new[] { "edge-website-languages" } } };
+        return new Hashtable { { "Success", true }, { "GuardedEntry", "StartMenu" }, { "SiteAcceptLanguage", "fr,en-US;q=0.9,en;q=0.8" } };
+    }
+
+    public IDictionary ApplyCurrentNode(string country, string ipv4, bool retirePrevious)
+    {
+        AssertWorker();
+        CurrentTarget = country + " " + ipv4 + (retirePrevious ? " --retire-previous" : "");
+        CurrentApplies++;
+        if (!PermitUpdate.Wait(TimeSpan.FromSeconds(12))) throw new TimeoutException();
+        if (UserRegionFallback) return new Hashtable { { "Success", false }, { "Message", "当前用户的商店版注册未通过。" },
+            { "UserRegionCountry", country }, { "UserRegionIpv4", ipv4 } };
+        if (FailApply) return new Hashtable { { "Success", false }, { "Restored", true }, { "RestoredClosed", true },
+            { "HadPrior", true }, { "Message", "原配置已恢复，Guard 联网仍关闭。" } };
+        return new Hashtable { { "Success", true }, { "GuardedEntry", "Desktop" } };
     }
 
     public IDictionary Recover()
@@ -154,9 +210,40 @@ internal sealed class FakeSetup : IGuardSetupActions
         return new Hashtable { { "Success", true }, { "Restored", true } };
     }
 
+    public void OpenManualSetting(string settingId)
+    {
+        AssertWorker();
+        ManualOpens.Add(settingId);
+    }
+
+    public IDictionary StartUserRegion(string country, string ipv4)
+    {
+        AssertWorker();
+        UserRegionTarget = country + " " + ipv4;
+        UserRegionCalls++;
+        return new Hashtable { { "Outcome", "ManualRequired" }, { "Message", "当前账户的地区和语言已应用，Edge 待核对。" },
+            { "Targets", new Hashtable { { "EdgeLanguages", new[] { "ja", "en" } } } } };
+    }
+
+    public IDictionary CheckManualSetting(string setting, string target, bool confirmEdge, string operation)
+    {
+        AssertWorker();
+        CheckedSetting = setting + " " + target;
+        ManualChecks++;
+        if (!confirmEdge)
+            return new Hashtable { { "Verified", false }, { "Current", target }, { "Message", "网站实际收到的语言尚未核实。" } };
+        bool localized = UserRegionFallback && String.IsNullOrEmpty(operation);
+        if (setting != "edge-website-languages" || (!localized && operation != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+            throw new InvalidOperationException("The explicit website check lacked the reviewed operation.");
+        ManualConfirms++;
+        return new Hashtable { { "Verified", true }, { "OperationVerified", !localized }, { "SiteAcceptLanguage", "ja,en;q=0.9" },
+            { "Current", target }, { "Message", "网站收到的 Accept-Language：ja,en;q=0.9" } };
+    }
+
     public IDictionary Progress()
     {
         AssertWorker();
+        if (CurrentApplies > 0) return new Hashtable { { "Phase", "CheckingCurrentNode" } };
         return new Hashtable { { "Phase", "Verify" }, { "FreshProofs", 3 }, { "RequiredProofs", 6 } };
     }
 
@@ -165,12 +252,76 @@ internal sealed class FakeSetup : IGuardSetupActions
 
 internal static class WindowTests
 {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateDesktop(string desktop, string device, IntPtr devmode, int flags, int access, IntPtr security);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool CloseDesktop(IntPtr desktop);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateProcess(string executable, StringBuilder command, IntPtr processSecurity,
+        IntPtr threadSecurity, bool inherit, uint flags, IntPtr environment, string directory,
+        ref StartupInfo startup, out ProcessInformation information);
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetStdHandle(int handle);
+    [DllImport("kernel32.dll")]
+    private static extern uint WaitForSingleObject(IntPtr handle, uint timeout);
+    [DllImport("kernel32.dll")]
+    private static extern bool GetExitCodeProcess(IntPtr process, out uint code);
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct StartupInfo
+    {
+        public int Size;
+        public string Reserved, Desktop, Title;
+        public int X, Y, Width, Height, XCount, YCount, Fill, Flags;
+        public short Show, ReservedLength;
+        public IntPtr ReservedPointer, Input, Output, Error;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessInformation
+    {
+        public IntPtr Process, Thread;
+        public int ProcessId, ThreadId;
+    }
+
     [STAThread]
     private static int Main(string[] args)
     {
-        SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(Dispatcher.CurrentDispatcher));
-        try { Test(args.Length == 0 ? "" : args[0]); return 0; }
+        try
+        {
+            if (args.Length > 0 && args[0] == "--private-desktop") return TestOnPrivateDesktop();
+            SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(Dispatcher.CurrentDispatcher));
+            Test(args.Length == 0 ? "" : args[0]);
+            return 0;
+        }
         catch (Exception error) { Console.Error.WriteLine(error.GetType().FullName + ": " + error.Message); return 1; }
+    }
+
+    private static int TestOnPrivateDesktop()
+    {
+        string name = "ClaudeGuardTests-" + Guid.NewGuid().ToString("N");
+        IntPtr desktop = CreateDesktop(name, null, IntPtr.Zero, 0, 0x10000000, IntPtr.Zero);
+        if (desktop == IntPtr.Zero) throw new System.ComponentModel.Win32Exception();
+        try
+        {
+            string exe = Assembly.GetExecutingAssembly().Location;
+            var startup = new StartupInfo { Size = Marshal.SizeOf(typeof(StartupInfo)), Desktop = @"WinSta0\" + name,
+                Flags = 0x100, Input = GetStdHandle(-10), Output = GetStdHandle(-11), Error = GetStdHandle(-12) };
+            ProcessInformation child;
+            if (!CreateProcess(exe, new StringBuilder("\"" + exe + "\""), IntPtr.Zero, IntPtr.Zero, true,
+                0x08000000, IntPtr.Zero, null, ref startup, out child)) throw new System.ComponentModel.Win32Exception();
+            try
+            {
+                uint code;
+                if (WaitForSingleObject(child.Process, 45000) != 0 || !GetExitCodeProcess(child.Process, out code))
+                    throw new InvalidOperationException("The private desktop fixture did not complete.");
+                return (int)code;
+            }
+            finally { CloseHandle(child.Thread); CloseHandle(child.Process); }
+        }
+        finally { CloseDesktop(desktop); }
     }
 
     private static T Find<T>(Window window, string name) where T : FrameworkElement { return (T) window.FindName(name); }
@@ -206,9 +357,10 @@ internal static class WindowTests
         if (!condition()) throw new TimeoutException(label);
     }
 
-    private static Window Show(FakeSetup fake, bool settings, bool autoUpdate)
+    private static Window Show(FakeSetup fake, bool settings, bool autoUpdate,
+        string country = null, string ipv4 = null, bool retirePrevious = false)
     {
-        Window window = new GuardSetupWindow.View(fake, settings, autoUpdate).Window;
+        Window window = new GuardSetupWindow.View(fake, settings, autoUpdate, country, ipv4, retirePrevious).Window;
         window.WindowStartupLocation = WindowStartupLocation.Manual;
         window.ShowInTaskbar = false;
         window.ShowActivated = false;
@@ -223,6 +375,26 @@ internal static class WindowTests
     {
         var button = Find<Button>(window, name);
         if (!button.IsEnabled || !button.IsVisible) throw new InvalidOperationException(name + " is unavailable.");
+        button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Pump();
+    }
+
+    private static Button FindTaggedButton(DependencyObject root, string tag)
+    {
+        var button = root as Button;
+        if (button != null && Object.Equals(button.Tag, tag)) return button;
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var found = FindTaggedButton(VisualTreeHelper.GetChild(root, i), tag);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private static void ClickTagged(DependencyObject root, string tag)
+    {
+        var button = FindTaggedButton(root, tag);
+        if (button == null || !button.IsVisible || !button.IsEnabled) throw new InvalidOperationException(tag + " is unavailable.");
         button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
         Pump();
     }
@@ -242,6 +414,14 @@ internal static class WindowTests
 
     private static void Test(string preview)
     {
+        MethodInfo target = typeof(GuardSetup).GetMethod("IsCurrentNodeTarget", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert((bool)target.Invoke(null, new[] { "JP", "203.0.113.28" }) &&
+            !(bool)target.Invoke(null, new[] { "jp", "203.0.113.28" }) &&
+            !(bool)target.Invoke(null, new[] { "JP", "203.0.113.028" }) &&
+            !(bool)target.Invoke(null, new[] { "JP", "::1" }) &&
+            !(bool)target.Invoke(null, new[] { "JP", "203.0.113.28 --update" }),
+            "The production host accepts only a two-letter country and canonical IPv4 for the current-node command");
+
         var existing = new FakeSetup { Installed = true, StopKind = "Guard" };
         var window = Show(existing, false, false);
         Until(() => Shown(window, "HomePage"), "Existing landing page");
@@ -432,6 +612,139 @@ internal static class WindowTests
             !Text(window, "ResultMessage").Contains("上一次配置"), "Fresh install rollback reports withdrawal without claiming a previous configuration");
         Capture(window, preview, "setup-rollback-receipt");
         window.Close();
+
+        var current = new FakeSetup { Installed = true };
+        window = Show(current, false, false, "JP", "203.0.113.28", true);
+        Until(() => current.CurrentApplies == 1 && Text(window, "WorkDetail").Contains("JP 203.0.113.28"), "Current node started");
+        Assert(Shown(window, "WorkPage") && current.Probes == 0 && current.Updates == 0 &&
+            current.CurrentTarget == "JP 203.0.113.28 --retire-previous" && !Shown(window, "MaskedNode"),
+            "Explicit current-node mode sends only its public target and shows visible progress without asking for a link");
+        current.PermitUpdate.Set();
+        Until(() => Shown(window, "ResultPage"), "Current node applied");
+        Assert(Text(window, "ResultTitle") == "防护已就绪" && current.CurrentApplies == 1,
+            "The current-node command runs once and shows the completion receipt");
+        window.Close();
+
+        var failed = new FakeSetup { Installed = true, FailApply = true };
+        failed.PermitUpdate.Set();
+        window = Show(failed, false, false, "JP", "203.0.113.28");
+        Until(() => Shown(window, "ResultPage"), "Current node rollback");
+        Assert(Text(window, "ResultMessage").Contains("联网仍关闭") && failed.CurrentApplies == 1,
+            "The current-node window reports closed rollback without retrying");
+        window.Close();
+
+        var interactive = new FakeSetup { Installed = true };
+        window = Show(interactive, true, false);
+        Until(() => Shown(window, "NodesPage"), "Current-node button");
+        Find<PasswordBox>(window, "MaskedNode").Password = "vless://synthetic";
+        Click(window, "ReadCurrentNodeButton");
+        Until(() => Find<Button>(window, "PrimaryButton").IsEnabled, "Detected node ready to review");
+        Assert(interactive.CurrentProbes == 1 && interactive.Probes == 0 && String.IsNullOrEmpty(Find<PasswordBox>(window, "MaskedNode").Password) &&
+            !Shown(window, "VisibleNode") && Text(window, "ProofDetail").Contains("东京"),
+            "The Nodes-page action probes the selected Bettbox node and shows its region without putting credentials in a field");
+        Click(window, "PrimaryButton");
+        Assert(Shown(window, "ChecksPage") && interactive.AppliedZone == null, "The selected node still requires the usual review and Apply action");
+        Click(window, "PrimaryButton");
+        Until(() => Shown(window, "ResultPage"), "Interactive current-node result");
+        Assert(interactive.AppliedZone == "Automatic" && interactive.CurrentApplies == 0,
+            "The reviewed selected node uses the normal Apply path");
+        window.Close();
+
+        var multilingual = new FakeSetup { Installed = true, RequireLocale = true };
+        window = Show(multilingual, true, false);
+        Until(() => Shown(window, "NodesPage"), "Multilingual node settings");
+        Click(window, "ReadCurrentNodeButton");
+        Until(() => Shown(window, "LocaleChoices") && Find<ComboBox>(window, "Locales").IsEnabled, "Locale choices appeared");
+        var localePicker = Find<ComboBox>(window, "Locales");
+        Assert(localePicker.Items.Count == 2 && localePicker.SelectedIndex == -1, "A multilingual country requires an explicit locale");
+        localePicker.SelectedValue = "fr-CA";
+        Until(() => Find<Button>(window, "PrimaryButton").IsEnabled && localePicker.IsEnabled, "Selected locale preview ready");
+        Click(window, "PrimaryButton");
+        Assert(Shown(window, "ChecksPage") && multilingual.AppliedLocale == null, "The locale selection appears in the reviewed plan before apply");
+        Click(window, "PrimaryButton");
+        Until(() => Shown(window, "ResultPage"), "Multilingual node applied");
+        Assert(multilingual.AppliedLocale == "fr-CA" && Shown(window, "ResultFacts"), "Normal Apply carries the reviewed locale to the release actions");
+        window.Close();
+
+        var manual = new FakeSetup { Installed = true, ManualFallback = true, BlockApply = true };
+        window = Show(manual, true, false);
+        Until(() => Shown(window, "NodesPage"), "Manual fallback starts on the node page");
+        Click(window, "ReadCurrentNodeButton");
+        Until(() => Find<Button>(window, "PrimaryButton").IsEnabled, "Review is available even with a setting blocked");
+        Click(window, "PrimaryButton");
+        var checkRows = Find<StackPanel>(window, "CheckRows");
+        var settingsGroup = (Expander)checkRows.Children[1];
+        foreach (UIElement row in ((StackPanel)settingsGroup.Content).Children)
+        {
+            var expander = row as Expander;
+            if (expander != null) expander.IsExpanded = true;
+        }
+        window.UpdateLayout();
+        Assert(!Find<Button>(window, "PrimaryButton").IsEnabled && manual.ManualOpens.Count == 0 && manual.ManualChecks == 0,
+            "Preflight shows manual shortcuts without launching settings or opening Edge");
+        string[] destinations = { "windows-time-zone", "windows-home-region", "windows-regional-format", "windows-preferred-languages", "edge-website-languages" };
+        foreach (string destination in destinations)
+        {
+            ClickTagged(checkRows, "manual-open:" + destination);
+            Until(() => manual.ManualOpens.Contains(destination), "Manual settings calls fixed target " + destination);
+        }
+        ClickTagged(checkRows, "manual-check:windows-time-zone");
+        Until(() => manual.ManualChecks == 1, "Time zone readback invoked");
+        Assert(manual.CheckedSetting == "windows-zone Tokyo Standard Time", "Time-zone shortcut and readback use the distinct fixed IDs");
+        ClickTagged(checkRows, "manual-open:allowed-ip");
+        Assert(Shown(window, "NodesPage") && manual.CurrentProbes == 1 && manual.ManualOpens.Count == 5,
+            "The egress shortcut returns to node settings without probing or opening another program");
+        manual.BlockApply = false;
+        Click(window, "ReadCurrentNodeButton");
+        Until(() => Find<Button>(window, "PrimaryButton").IsEnabled, "Node plan ready after returning");
+        Click(window, "PrimaryButton");
+        Click(window, "PrimaryButton");
+        Until(() => Shown(window, "ResultPage"), "Partial result displays as installed");
+        var manualResult = Find<StackPanel>(window, "ResultManual");
+        Assert(Text(window, "ResultMessage").Contains("防护验收通过") && Shown(window, "ResultManual") && manual.ManualConfirms == 0 &&
+            !ContainsText(Find<StackPanel>(window, "ResultFacts"), "Accept-Language"), "Saved preferences alone do not yield a website receipt");
+        ClickTagged(manualResult, "manual-check:edge-website-languages");
+        Until(() => ContainsText(manualResult, "尚未核实"), "Quiet recheck records status in the same result");
+        Assert(manual.ManualConfirms == 0 && Text(window, "ResultTitle").Contains("待核对"), "Quiet recheck cannot claim success from the saved profile");
+        ClickTagged(manualResult, "manual-confirm:edge-website-languages");
+        Until(() => Text(window, "ResultTitle") == "七项设置已核对", "Explicit website receipt saved");
+        Assert(manual.ManualConfirms == 1 && ContainsText(Find<StackPanel>(window, "ResultFacts"), "ja,en;q=0.9"),
+            "Explicit website recheck finishes the original receipt without applying the node again");
+        window.Close();
+
+        var twoManual = new FakeSetup { Installed = true, ManualFallback = true, ManualWindows = true };
+        window = Show(twoManual, true, false);
+        Until(() => Shown(window, "NodesPage"), "Both manual targets start on the node page");
+        Click(window, "ReadCurrentNodeButton");
+        Until(() => Find<Button>(window, "PrimaryButton").IsEnabled, "Both manual targets can be reviewed");
+        Click(window, "PrimaryButton");
+        Click(window, "PrimaryButton");
+        Until(() => Shown(window, "ResultManual"), "Both manual actions appear in the full result");
+        var bothActions = Find<StackPanel>(window, "ResultManual");
+        Assert(FindTaggedButton(bothActions, "manual-open:windows-preferred-languages") != null &&
+            FindTaggedButton(bothActions, "manual-confirm:edge-website-languages") != null, "Pending Windows and Edge have independent manual actions");
+        ClickTagged(bothActions, "manual-confirm:edge-website-languages");
+        Until(() => Text(window, "ResultTitle") == "Edge 网站语言已核对", "Edge result retains the Windows pending state");
+        Assert(Text(window, "ResultMessage").Contains("Windows 首选语言仍需单独核对"), "An Edge readback never claims seven settings when Windows is pending");
+        window.Close();
+
+        var scoped = new FakeSetup { Installed = true, UserRegionFallback = true };
+        scoped.PermitUpdate.Set();
+        window = Show(scoped, false, false, "JP", "203.0.113.28");
+        Until(() => Shown(window, "ApplyUserRegionButton"), "User-only fallback appears after a protected preflight failure");
+        Assert(scoped.CurrentApplies == 1 && scoped.UserRegionCalls == 0 && scoped.ManualOpens.Count == 0,
+            "User-only fallback is shown in the same failed result and requires an explicit click");
+        string protectedTitle = Text(window, "ResultTitle");
+        Click(window, "ApplyUserRegionButton");
+        Until(() => Text(window, "UserRegionResult").Contains("请调整 Edge 网站语言"), "Windowless user-only operation completed");
+        Assert(scoped.UserRegionTarget == "JP 203.0.113.28" && Text(window, "ResultTitle") == protectedTitle && scoped.ManualOpens.Count == 0,
+            "Fallback uses the exact public target and does not change the failed protection status or open Edge");
+        var scopedPanel = Find<StackPanel>(window, "UserRegionManual");
+        ClickTagged(scopedPanel, "manual-confirm:edge-website-languages");
+        Until(() => ContainsText(scopedPanel, "防护更新仍未完成"), "User-only sample is shown without a protected operation");
+        Assert(scoped.ManualConfirms == 1 && Text(window, "ResultTitle") == protectedTitle,
+            "Explicit Edge recheck after user-only apply does not publish a protected acceptance");
+        window.Close();
     }
 }
 '@
@@ -442,11 +755,20 @@ try {
     [IO.File]::WriteAllText($test, $fixture, [Text.UTF8Encoding]::new($true))
     $references = @('WindowsBase.dll','PresentationCore.dll','PresentationFramework.dll','UIAutomationTypes.dll' | ForEach-Object { '/reference:'+(Join-Path $wpf $_) })
     $references += '/reference:'+(Join-Path $framework 'System.Xaml.dll')
+    $references += '/reference:System.IO.Compression.dll'
+    $references += '/reference:System.Web.Extensions.dll'
+    $references += '/reference:'+[Management.Automation.PowerShell].Assembly.Location
     $xaml = Join-Path $project 'release\GuardSetupWindow.xaml'
-    $source = Join-Path $project 'release\GuardSetupWindow.cs'
-    & (Join-Path $framework 'csc.exe') /nologo /target:exe /platform:x64 /langversion:5 /codepage:65001 @references "/resource:$xaml,Guard.SetupWindow" "/out:$exe" $source $test
+    $sources = 'GuardSetup.cs','GuardSetupActions.cs','GuardSetupWindow.cs','GuardSiteLanguage.cs','GuardUserRegionHost.cs','GuardUserRegionWindow.cs' |
+        ForEach-Object { Join-Path (Join-Path $project 'release') $_ }
+    & (Join-Path $framework 'csc.exe') /nologo /target:exe /main:WindowTests /platform:x64 /langversion:5 /codepage:65001 @references "/resource:$xaml,Guard.SetupWindow" "/out:$exe" @sources $test
     if($LASTEXITCODE -ne 0){throw 'WPF test fixture compilation failed.'}
-    if($PreviewDirectory){& $exe $PreviewDirectory}else{& $exe}
+    if($PrivateDesktop -and $PreviewDirectory){throw 'Private desktop tests do not capture previews.'}
+    $fixtureArguments=@(
+        if($PrivateDesktop){'--private-desktop'}
+        if($PreviewDirectory){$PreviewDirectory}
+    )
+    & $exe @fixtureArguments
     if($LASTEXITCODE -ne 0){throw 'Native WPF window tests failed.'}
 } finally {
     if([IO.Path]::GetDirectoryName($scratch) -ieq [IO.Path]::GetTempPath().TrimEnd('\') -and

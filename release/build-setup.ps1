@@ -157,17 +157,18 @@ function Write-SetupArchive([string]$Path,[System.Collections.IDictionary]$Files
 try{
     $payload=@{}
     $packageNames=@(
-        'check-protection.ps1','guard-app-container.cs','guard-autorefresh.ps1','guard-common.ps1',
+        'check-protection.ps1','guard-app-container.cs','guard-autorefresh.ps1','guard-bettbox-profile.ps1','guard-common.ps1',
         'guard-daily-controller.ps1','guard-daily-cutover.ps1','guard-daily-notifications.ps1','guard-daily-notifier-task.ps1',
         'guard-daily-notifier.ps1','guard-daily-package.ps1','guard-daily-plan.ps1','guard-daily-store-stage.ps1',
         'guard-daily-store-worker.ps1','guard-daily-supervisor.ps1','guard-daily.ps1','guard-diagnostics.ps1',
         'guard-isolation.ps1','guard-lookup-preferences.ps1','guard-network.ps1','guard-node-profile.ps1','guard-privacy.ps1',
         'guard-profile-store.ps1','guard-region-profile.ps1','guard-relay-evidence.cs','guard-runtime.ps1','guard-sandboxie.ps1',
-        'guard-wfp.cs','open-claude-daily.cmd','open-claude-daily.ps1','setup-firewall.ps1'
+        'guard-wfp.cs','guard-node-locale.ps1','guard-windows-locale.ps1','guard-browser-languages.ps1',
+        'open-claude-daily.cmd','open-claude-daily.ps1','setup-firewall.ps1'
     )
     foreach($name in $packageNames){$payload['package/'+$name]=Read-SetupInput (Join-Path $root ('package\'+$name))}
     foreach($name in 'install-guard.ps1','install-guard-helpers.ps1','guard-window-actions.ps1','guard-window-evidence.ps1','guard-profile-actions.ps1',
-        'guard-region-zones.json','Unicode-Data-License.txt'){
+        'guard-region-zones.json','guard-release-retirement.ps1','guard-site-language.ps1','guard-user-region.ps1','Unicode-Data-License.txt'){
         $payload['release/'+$name]=Read-SetupInput (Join-Path $PSScriptRoot $name)
     }
     $observer=Read-SetupInput $NodePath '86FC4785327DB5F5C7558DC6156C543B433C313E813A222E088086222AB4AFA6'
@@ -233,7 +234,7 @@ try{
     $sources=@{}
     foreach($name in $payload.Keys){if($name -notmatch '\.(?:exe|sys|cat|dll|sig|ini)$'){$sources[$name]=$payload[$name]}}
     $sources['vendor/sandboxie/Templates.ini']=$payload['vendor/sandboxie/Templates.ini']
-    foreach($name in 'GuardSetup.cs','GuardSetupActions.cs','GuardSetupWindow.cs','GuardSetupWindow.xaml','build-setup.ps1','guard-setup.manifest'){
+    foreach($name in 'GuardSetup.cs','GuardSetupActions.cs','GuardSetupWindow.cs','GuardSetupWindow.xaml','GuardSiteLanguage.cs','GuardUserRegionHost.cs','GuardUserRegionWindow.cs','build-setup.ps1','guard-setup.manifest'){
         $sources['release/'+$name]=Read-SetupInput (Join-Path $PSScriptRoot $name)
     }
     $dependencies=@(
@@ -250,15 +251,16 @@ try{
     $payloadZip=Join-Path $scratch 'payload.zip'
     $manifest=Join-Path $scratch 'payload.tsv'
     Write-SetupArchive $payloadZip $payload $manifest
-    $version='1.0.1'
+    $version='1.0.4'
     $exeName="ClaudeGuardSetup-$version-x64.exe"
     $compiled=Join-Path $scratch $exeName
-    $nativeSources=@('GuardSetup.cs','GuardSetupActions.cs','GuardSetupWindow.cs' | ForEach-Object {Join-Path $PSScriptRoot $_})
+    $nativeSources=@('GuardSetup.cs','GuardSetupActions.cs','GuardSetupWindow.cs','GuardSiteLanguage.cs','GuardUserRegionHost.cs','GuardUserRegionWindow.cs' | ForEach-Object {Join-Path $PSScriptRoot $_})
     $xaml=Join-Path $PSScriptRoot 'GuardSetupWindow.xaml'
     $win32=Join-Path $PSScriptRoot 'guard-setup.manifest'
     Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase,System.Xaml
     $references=@(
         '/reference:System.IO.Compression.dll'
+        '/reference:System.Web.Extensions.dll'
         foreach($type in [Management.Automation.PowerShell],[Windows.Window],[Windows.Media.Visual],[Windows.DependencyObject],[Xaml.XamlReader]){
             '/reference:'+$type.Assembly.Location
         }
