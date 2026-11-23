@@ -1,0 +1,63 @@
+# Claude Guard tests
+
+Run these commands from the checkout root, which contains `package/`, `release/`, and `tests/`. Use 64-bit Windows PowerShell 5.1 for the PowerShell fixtures. Run each PowerShell command in a fresh process so its fixture functions and compiled types are isolated.
+
+## Offline checks
+
+These fixtures use test data and mocked operations. The Node.js observer test uses a local loopback server and a self-signed test certificate. The matching PEM key is deliberately public and belongs only to that fixture.
+
+```powershell
+powershell.exe -NoProfile -File ./tests/offline-tests.ps1
+powershell.exe -NoProfile -File ./tests/daily-controller-tests.ps1
+powershell.exe -NoProfile -File ./tests/daily-notification-tests.ps1
+powershell.exe -NoProfile -File ./tests/daily-notifier-task-tests.ps1
+powershell.exe -NoProfile -File ./tests/daily-record-publication-tests.ps1
+powershell.exe -NoProfile -File ./tests/daily-revision-baseline-tests.ps1
+powershell.exe -NoProfile -File ./tests/daily-revision-evidence-tests.ps1
+powershell.exe -NoProfile -File ./tests/daily-store-stage-tests.ps1
+powershell.exe -NoProfile -File ./tests/daily-use-tests.ps1
+powershell.exe -NoProfile -File ./tests/region-profile-tests.ps1
+powershell.exe -NoProfile -File ./tests/release-install-tests.ps1
+powershell.exe -NoProfile -File ./tests/setup-profile-actions-tests.ps1
+powershell.exe -NoProfile -File ./tests/setup-transaction-integration.ps1
+powershell.exe -NoProfile -File ./tests/setup-window-evidence-tests.ps1
+powershell.exe -NoProfile -File ./tests/wfp-scope-readback.tests.ps1
+node.exe --test ./tests/exit-observer.test.mjs
+powershell.exe -NoProfile -File ./tests/renewal-scheduling-replay.ps1 -ControllerPath ./package/guard-daily-controller.ps1
+```
+
+Run the window fixtures in an interactive Windows desktop session. `setup-ui-tests.ps1` uses the legacy WinForms setup source at `release/guard-setup-ui.ps1`. `setup-native-window-tests.ps1` exercises the WPF setup window shipped in 1.0.1.
+
+```powershell
+powershell.exe -NoProfile -STA -File ./tests/setup-ui-tests.ps1
+powershell.exe -NoProfile -STA -File ./tests/setup-native-window-tests.ps1
+```
+
+## Relay, observer, and setup package
+
+Use the release's Windows x64 Mihomo v1.19.30 binary and Node.js v24.22.3. The relay and node profile tests use synthetic local receivers. `test-mihomo-config.ps1` verifies the original Mihomo release binary ZIP before extracting a temporary copy and checking a synthetic configuration. The production observer source exists under `runtime/` in the released source archive. The identical copy beside the tests is used by the Node fixtures.
+
+Set `$mihomoExe`, `$mihomoZip`, `$nodeExe`, and `$setupExe` to your local dependency and release paths. The setup test uses the verified release EXE's `--verify` and `--extract-test` modes. See `licenses/THIRD-PARTY-NOTICES.md` for release versions and dependency sources.
+
+```powershell
+powershell.exe -NoProfile -File ./tests/guard-relay-listener.tests.ps1
+powershell.exe -NoProfile -File ./tests/guard-relay-evidence.tests.ps1 -MihomoPath $mihomoExe -NodePath $nodeExe
+powershell.exe -NoProfile -File ./tests/node-profile-tests.ps1 -MihomoPath $mihomoExe -NodePath $nodeExe
+powershell.exe -NoProfile -File ./tests/test-mihomo-config.ps1 -MihomoArchive $mihomoZip
+powershell.exe -NoProfile -File ./tests/setup-package-tests.ps1 -SetupPath $setupExe
+powershell.exe -NoProfile -File ./tests/run-loopback-lab.ps1 -Monitor
+```
+
+The optional `observer-endurance.ps1` loopback test runs for at least one hour, or four hours with `-WithTraffic`. It writes its generated results to a unique directory under Windows TEMP by default. Pass `-OutputDirectory` to keep the results elsewhere.
+
+## Native Windows labs and local diagnostics
+
+Use a disposable Windows VM for the native labs. Some use administrator privileges to exercise Windows Filtering Platform, AppContainers, MSIX registration, Windows DNS policy, scheduled tasks, or Sandboxie services and then clean up their own fixtures. The standalone MSIX control fixture requires the Windows SDK `makeappx.exe` and Windows support for unsigned fixture packages. Set `$makeAppx` to that SDK tool before running it.
+
+```powershell
+powershell.exe -NoProfile -File ./tests/native-normal-package-lab.ps1 -ControlOnly -MakeAppxPath $makeAppx
+```
+
+The protected native and Store lab components remain available as source. Their full acceptance workflow was tied to an administrator-owned stage, pinned SDK and Sandboxie files, and a separately authorized live Guard installation. The prior-hour verifier requires independently pinned local receipts, the reviewed input manifest, and both protected stages. Historical run receipts, provisioning drafts, and production cutover commands are outside this checkout.
+
+`tools/inspect-bettbox-route.ps1` reads a local saved Bettbox selection, the listener and adapter and returns a summary. `tools/snapshot-live-guard.ps1` reads an existing Guard deployment and writes a local snapshot. Use `-DeployedPackageDirectory` and `-OutputPath` for the snapshot, with `-AdditionalRulePrefix` only for a legacy isolation deployment you administer. Keep diagnostic output local because it can contain paths, account identifiers, firewall addresses, and scheduled task arguments.
