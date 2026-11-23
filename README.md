@@ -8,6 +8,8 @@ Claude Guard is a Windows x64 tool for keeping the Microsoft Store edition of Cl
 
 This repository includes the original Claude Guard interface, Windows protection components, and test fixtures prepared for public release. The 1.0.1 installer and complete source archive also include eight scripts derived from gruskry/claude-vpn-guard. The pinned upstream version has no published license declaration. Distribution of those scripts and the two complete artifacts is awaiting confirmation of the applicable terms. [Upstream v1.4.4](https://github.com/gruskry/claude-vpn-guard/releases/tag/v1.4.4)
 
+The SHA-256 file identifies the exact installer and source ZIP built for the original 1.0.1 release. [Original artifact checksums](checksums/ClaudeGuardSetup-1.0.1-SHA256.txt)
+
 ## Try the interface
 
 On Windows x64 with the .NET Framework WPF components and 64-bit Windows PowerShell 5.1, run the native window fixture from the checkout root.
