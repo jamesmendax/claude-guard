@@ -14,8 +14,8 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Claude Guard Native")]
 [assembly: AssemblyProduct("Claude Guard Native")]
 [assembly: AssemblyDescription("Local Windows VPN and firewall launch guard")]
-[assembly: AssemblyVersion("1.0.9.0")]
-[assembly: AssemblyFileVersion("1.0.9.0")]
+[assembly: AssemblyVersion("1.0.10.0")]
+[assembly: AssemblyFileVersion("1.0.10.0")]
 
 namespace ClaudeGuardNative
 {
@@ -119,7 +119,7 @@ namespace ClaudeGuardNative
                 if ((mode == "Configure" || maintenance) && !IsElevated())
                     return GuardResult.Failure("Firewall setup requires administrator approval.");
                 if (maintenance && !IsInstalledConsole())
-                    return GuardResult.Failure("Run this action through the installed Native Guard 1.0.9 console.");
+                    return GuardResult.Failure("Run this action through the installed Native Guard 1.0.10 console.");
                 if (launching || mode == "RemoveRules")
                 {
                     launchLock = new Mutex(false, @"Global\ClaudeGuardNativeFirewallSetup");
@@ -180,7 +180,7 @@ namespace ClaudeGuardNative
         private static bool IsInstalledConsole()
         {
             string installed = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-                "Claude Guard Native", "1.0.9", "ClaudeGuardNativeConsole.exe");
+                "Claude Guard Native", "1.0.10", "ClaudeGuardNativeConsole.exe");
             return String.Equals(Application.ExecutablePath, installed, StringComparison.OrdinalIgnoreCase);
         }
 
@@ -388,7 +388,7 @@ namespace ClaudeGuardNative
         private static int PrintUsage(int exitCode)
         {
             TextWriter writer = exitCode == 0 ? Console.Out : Console.Error;
-            writer.WriteLine("Claude Guard Native 1.0.9");
+            writer.WriteLine("Claude Guard Native 1.0.10");
             writer.WriteLine("  --status [--cli]");
             writer.WriteLine("  --configure [--cli]");
             writer.WriteLine("  --desktop [--time-zone ID]");

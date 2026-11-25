@@ -151,6 +151,31 @@ function Assert-GuardNativeCoverage($State, $Context) {
     Assert-GuardCoverage $Context.Rules @($State.Rules)
 }
 
+function Get-GuardNativeClientProcesses($Inventory) {
+    $running = @(Get-GuardRunningProcesses $Inventory)
+    $background = @($running | Where-Object { $_.SessionId -eq 0 -and $_.ProcessName -ieq 'cowork-svc' })
+    if ($background.Count) {
+        $service = Get-CimInstance Win32_Service -Filter "Name='CoworkVMServiceStore'" -ErrorAction Stop
+        $instance = @($background | Where-Object Id -EQ $service.ProcessId)
+        if ($service.State -eq 'Running' -and $service.StartName -eq 'LocalSystem' -and $instance.Count -eq 1) {
+            $image = [string]$instance[0].Path
+            $registered = [string]$service.PathName
+            $pathMatches = $registered -match '^\s*(?:"([^"]+)"|(.+?\.exe))(?=\s|$)'
+            $servicePath = if ($pathMatches) { $Matches[1] + $Matches[2] }
+            $packageRoot = @($Inventory.Packages | Where-Object {
+                $_.Family -eq 'AnthropicPBC.Claude_fnn82j28hfe8t' -and
+                    $image.StartsWith($_.Root.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)
+            })
+            # The signed Windows service still has outbound rules. It is not an open Desktop or CLI session.
+            if ($image -and $image -ieq $servicePath -and $packageRoot.Count -eq 1 -and
+                (Test-GuardAnthropicSignature $image)) {
+                return @($running | Where-Object Id -NE $instance[0].Id)
+            }
+        }
+    }
+    $running
+}
+
 function Get-GuardNativeStatus([switch]$Cli) {
     $answer = New-GuardResult
     try {
@@ -158,7 +183,7 @@ function Get-GuardNativeStatus([switch]$Cli) {
         Assert-GuardNoDailyPolicy
         $context = Get-GuardNativeContext '' $answer -Cli:$Cli
         Assert-GuardProfiles
-        if (@(Get-GuardRunningProcesses $context.Inventory).Count) {
+        if (@(Get-GuardNativeClientProcesses $context.Inventory).Count) {
             $answer.Claude = 'Already running'
             throw 'Close the existing Claude session before starting or setting up this guard.'
         }
@@ -192,7 +217,7 @@ function Save-GuardNativeState($State) {
     try {
         [IO.File]::WriteAllText($temp, ($State | ConvertTo-Json -Depth 5 -Compress))
         if ([IO.File]::Exists($script:GuardState)) {
-            [IO.File]::Replace($temp, $script:GuardState, $null)
+            [IO.File]::Replace($temp, $script:GuardState, [NullString]::Value)
         } else {
             [IO.File]::Move($temp, $script:GuardState)
         }
@@ -227,7 +252,7 @@ function Set-GuardNativeProtection([switch]$Refresh) {
         }
         $pin = if ($Refresh) { [string]$previous.VpnGuid } else { '' }
         $context = Get-GuardNativeContext $pin -Setup -AllowVpnDown:$Refresh
-        if (@(Get-GuardRunningProcesses $context.Inventory).Count) {
+        if (@(Get-GuardNativeClientProcesses $context.Inventory).Count) {
             if ($Refresh) { return (New-GuardResult 'Refresh deferred while Claude is running.') }
             throw 'Close Claude before applying native firewall rules.'
         }
@@ -269,7 +294,7 @@ function Set-GuardNativeProtection([switch]$Refresh) {
             if ((Get-GuardNativeFingerprint $current) -cne (Get-GuardNativeFingerprint $context)) {
                 throw 'The VPN, adapter inventory or Claude installation changed during setup.'
             }
-            if (@(Get-GuardRunningProcesses $current.Inventory).Count) {
+            if (@(Get-GuardNativeClientProcesses $current.Inventory).Count) {
                 throw 'A Claude session appeared during firewall setup.'
             }
             $state = [pscustomobject]@{
@@ -327,7 +352,7 @@ function Invoke-GuardNativeDesktop([switch]$Cli, [string]$Zone, [string[]]$Argum
     if (-not $state) { throw 'The native firewall rules need to be set up before launch.' }
     $context = Get-GuardNativeContext ([string]$state.VpnGuid) -Cli:$Cli
     Assert-GuardNativeCoverage $state $context
-    if (@(Get-GuardRunningProcesses $context.Inventory).Count) {
+    if (@(Get-GuardNativeClientProcesses $context.Inventory).Count) {
         throw 'Close the existing Claude session before opening a guarded one.'
     }
     $snapshot = Get-GuardNativeFingerprint $context
@@ -356,7 +381,7 @@ function Invoke-GuardNativeDesktop([switch]$Cli, [string]$Zone, [string[]]$Argum
                 $exitCode = $started.ExitCode
                 break
             }
-            $running = @(Get-GuardRunningProcesses $context.Inventory)
+            $running = @(Get-GuardNativeClientProcesses $context.Inventory)
             if ($running.Count) { $seen = $true }
             if (-not $running.Count -and $started.HasExited -and $seen) { break }
             if (-not $seen -and $clock.Elapsed.TotalSeconds -gt 15) {

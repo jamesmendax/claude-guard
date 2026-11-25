@@ -281,10 +281,55 @@ Assert-Check (
     $script:ObservedArgs[3] -ceq 'a"b'
 ) 'Guarded CLI forwards arguments and preserves the child exit code.'
 
+Reset-Fixture
+$script:ProxyPresent = $true
+$status = Get-GuardNativeStatus
+Assert-Check (-not $status.Ready -and $status.Message -like '*proxy configured*') 'A configured proxy blocks launch readiness.'
+
 $core = Join-Path $PSScriptRoot '.build\NetworkCore.ps1'
 $coreErrors = $null
 $coreAst = [System.Management.Automation.Language.Parser]::ParseFile($core, [ref]$tokens, [ref]$coreErrors)
 if ($coreErrors.Count) { throw ($coreErrors | Out-String) }
+$vpnDiscovery = $coreAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -ceq 'Get-GuardVpnAdapter'
+}, $false)
+& {
+    . ([scriptblock]::Create($vpnDiscovery.Extent.Text))
+    $adapter = [pscustomobject]@{
+        Name = 'Bettbox'; InterfaceDescription = 'Meta Tunnel'; InterfaceGuid = $script:Pin
+        Status = 'Up'; HardwareInterface = $false; ifIndex = 9
+        DriverDescription = 'Wintun Userspace Tunnel'; DriverProvider = 'WireGuard LLC'
+    }
+    $lastRouteIndex = 9
+    function Get-GuardNetworkAdapters { $adapter }
+    function Get-GuardRouteIndex([string]$Address) {
+        if ($Address -eq '200.1.1.1') { $lastRouteIndex } else { 9 }
+    }
+
+    Assert-Check ((Get-GuardVpnAdapter).InterfaceGuid -eq $script:Pin) 'A full-tunnel Wintun adapter can have a custom description.'
+    $lastRouteIndex = 10
+    Assert-Throws { Get-GuardVpnAdapter } 'Internet routes use different interfaces'
+    $lastRouteIndex = 9
+    $adapter.Status = 'Disconnected'
+    Assert-Throws { Get-GuardVpnAdapter } 'No active VPN tunnel'
+    $adapter.Status = 'Up'
+    $adapter.HardwareInterface = $true
+    Assert-Throws { Get-GuardVpnAdapter } 'No active VPN tunnel'
+    $adapter.HardwareInterface = $false
+    Assert-Throws { Get-GuardVpnAdapter $script:AdapterId } 'no longer uses the saved VPN'
+    Assert-Check ((Get-GuardVpnAdapter $script:Pin).InterfaceGuid -eq $script:Pin) 'Wintun discovery still requires the saved adapter and a single active virtual route.'
+
+    $adapter.DriverProvider = 'Other vendor'
+    Assert-Throws { Get-GuardVpnAdapter } 'VPN type is not recognized'
+    $adapter.DriverProvider = 'WireGuard LLC'
+    $adapter.DriverDescription = 'Other tunnel'
+    Assert-Throws { Get-GuardVpnAdapter } 'VPN type is not recognized'
+    $adapter.InterfaceDescription = 'TAP-Windows Adapter'
+    Assert-Check ((Get-GuardVpnAdapter).InterfaceGuid -eq $script:Pin) 'Both Wintun driver fields are required for a custom description and existing VPN types still work.'
+}
+
 $escaping = $coreAst.Find({
     param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -317,6 +362,27 @@ $script:FixtureState.OwnerSid = 'S-1-5-18'
 Assert-Throws { Set-GuardNativeProtection -Refresh } 'another Windows user'
 Assert-Check ($script:CreateCount -eq 0 -and $script:WriteCount -eq 0) 'Refresh rejects a different policy owner before writing.'
 
+& {
+    $servicePath = 'C:\NativeGuardFixture\Store\cowork-svc.exe'
+    $desktopProcess = [pscustomobject]@{ SessionId = 1; ProcessName = 'Claude'; Id = 43; Path = $script:FixtureExe }
+    $serviceProcess = [pscustomobject]@{ SessionId = 0; ProcessName = 'cowork-svc'; Id = 44; Path = $servicePath }
+    $service = [pscustomobject]@{ State = 'Running'; StartName = 'LocalSystem'; ProcessId = 44; PathName = ('"' + $servicePath + '"') }
+    $inventory = [pscustomobject]@{
+        Programs = @($script:FixtureExe, $servicePath)
+        Packages = @([pscustomobject]@{ Family = 'AnthropicPBC.Claude_fnn82j28hfe8t'; Root = 'C:\NativeGuardFixture\Store' })
+    }
+    function Get-GuardRunningProcesses($Inventory) { @($serviceProcess, $desktopProcess) }
+    function Get-CimInstance($ClassName, $Filter) {
+        if ($ClassName -ne 'Win32_Service' -or $Filter -cne "Name='CoworkVMServiceStore'") { throw 'Unexpected service query.' }
+        $service
+    }
+    function Test-GuardAnthropicSignature([string]$Path) { $Path -ieq $servicePath }
+    $clients = @(Get-GuardNativeClientProcesses $inventory)
+    Assert-Check ($clients.Count -eq 1 -and $clients[0].Id -eq 43 -and $servicePath -in $inventory.Programs) 'The signed Store service retains firewall coverage without counting as an open Claude session.'
+    $service.ProcessId = 45
+    Assert-Check (@(Get-GuardNativeClientProcesses $inventory).Count -eq 2) 'A process that does not match the registered service still blocks rule replacement.'
+}
+
 . (Join-Path $PSScriptRoot 'NativeSession.ps1')
 $script:SessionJournal = Join-Path (Split-Path $core -Parent) ("zone-fixture-{0}.json" -f [guid]::NewGuid().ToString('N'))
 $script:CurrentZone = 'UTC'
@@ -341,6 +407,35 @@ try {
     ) 'Session recovery preserves a later user change.'
 } finally {
     [IO.File]::Delete($script:SessionJournal)
+}
+
+& {
+    $writer = $ast.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Save-GuardNativeState'
+    }, $false)
+    . ([scriptblock]::Create($writer.Extent.Text))
+    function Assert-GuardNativeFolder {}
+    function Initialize-GuardAdministratorDirectory([string]$Path) {}
+
+    $folder = Join-Path ([IO.Path]::GetTempPath()) ('native-state-fixture-' + [guid]::NewGuid().ToString('N'))
+    $priorFolder = $script:GuardFolder
+    $priorFile = $script:GuardState
+    try {
+        $null = [IO.Directory]::CreateDirectory($folder)
+        $script:GuardFolder = $folder
+        $script:GuardState = Join-Path $folder 'firewall.json'
+        Save-GuardNativeState ([pscustomobject]@{ Generation = 'first' })
+        Save-GuardNativeState ([pscustomobject]@{ Generation = 'second' })
+        $saved = [IO.File]::ReadAllText($script:GuardState) | ConvertFrom-Json
+        Assert-Check ($saved.Generation -ceq 'second' -and [IO.Directory]::GetFiles($folder).Length -eq 1) 'Replacing saved rule state works in Windows PowerShell without a backup path.'
+    } finally {
+        [IO.File]::Delete((Join-Path $folder 'firewall.json'))
+        if ([IO.Directory]::Exists($folder)) { [IO.Directory]::Delete($folder) }
+        $script:GuardFolder = $priorFolder
+        $script:GuardState = $priorFile
+    }
 }
 
 Write-Output "$script:Passed offline Native Guard checks passed."

@@ -46,6 +46,16 @@ try {
     $runtime = Read-ZipScript $archive '*/guard-runtime.ps1'
 } finally { $archive.Dispose() }
 
+# Some Wintun clients advertise a custom adapter description. Use the driver
+# metadata for these adapters after the existing full-tunnel and virtual checks.
+$oldVpnCheck = 'elseif ($vpn.InterfaceDescription -notmatch'
+$newVpnCheck = @'
+elseif (-not ($vpn.DriverDescription -eq 'Wintun Userspace Tunnel' -and $vpn.DriverProvider -eq 'WireGuard LLC') -and
+        $vpn.InterfaceDescription -notmatch
+'@
+if (-not $network.Contains($oldVpnCheck)) { throw 'The archived VPN adapter check changed.' }
+$network = $network.Replace($oldVpnCheck, $newVpnCheck)
+
 # Reuse the existing rule matching and program discovery. Recognize both Store identities.
 $oldFilter = "-eq 'Claude_pzs8sxrjxfjjc'"
 $newFilter = "-in @('Claude_pzs8sxrjxfjjc','AnthropicPBC.Claude_fnn82j28hfe8t')"
@@ -81,8 +91,8 @@ $compilerArguments = @(
     (Join-Path $PSScriptRoot 'RegionalSettingsWindow.cs'), (Join-Path $PSScriptRoot 'DnsSettingsWindow.cs'),
     (Join-Path $PSScriptRoot 'GuardDiagnostics.cs')
 )
-$appName = 'ClaudeGuardNative-1.0.9-x64.exe'
-$consoleName = 'ClaudeGuardNativeConsole-1.0.9-x64.exe'
+$appName = 'ClaudeGuardNative-1.0.10-x64.exe'
+$consoleName = 'ClaudeGuardNativeConsole-1.0.10-x64.exe'
 $app = Join-Path $buildFolder $appName
 $console = Join-Path $buildFolder $consoleName
 $compiler = Join-Path $framework 'csc.exe'

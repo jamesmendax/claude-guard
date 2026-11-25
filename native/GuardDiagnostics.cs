@@ -59,7 +59,7 @@ namespace ClaudeGuardNative
             using (var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write))
             using (var writer = new StreamWriter(output, Utf8))
             {
-                writer.WriteLine("Claude Guard Native 1.0.9");
+                writer.WriteLine("Claude Guard Native 1.0.10");
                 writer.WriteLine("Created " + DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
                 if (last != null)
                 {
