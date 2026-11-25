@@ -4,9 +4,9 @@ Claude Guard is a Windows x64 tool for keeping the Microsoft Store edition of Cl
 
 ![Claude Guard 1.0.1 overview with sample data](docs/images/overview.png)
 
-## Native Guard 1.0.10 source preview
+## Native Guard 1.0.11
 
-The Native Guard preview uses the Windows Firewall with a full-tunnel VPN. It adds guarded desktop and native CLI launch, an optional background refresh, session time zone recovery, encrypted DNS controls, and an independent Windows region and default input window. [Native source, build steps and verification status](native/README.md)
+Native Guard uses Windows Firewall with a full-tunnel VPN. This release builds from the Native Guard source and the tools included with Windows. It adds guarded desktop and native CLI launch, an optional background refresh, session time zone recovery, encrypted DNS controls, and an independent Windows region and default input window. [Native source, build steps and verification status](native/README.md) · [Native Guard releases](https://github.com/jamesmendax/claude-guard/releases)
 
 ## What's new in 1.0.4
 
@@ -33,7 +33,7 @@ The fixture opens the WPF setup window with sample data and mock actions. It exe
 ## Repository layout
 
 - `package/` contains the Windows protection components included in the public snapshot.
-- `native/` contains the project-owned Native Guard 1.0.10 implementation and offline tests.
+- `native/` contains the complete Native Guard 1.0.11 source and offline tests.
 - `release/` contains the WPF host, setup actions, build logic, and region catalog.
 - `runtime/` contains the exit observer.
 - `tests/` contains fixtures and their dependencies. Some integration suites require the full runtime. [Test instructions](tests/README.md)

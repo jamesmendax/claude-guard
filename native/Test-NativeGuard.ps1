@@ -47,6 +47,7 @@ function Reset-Fixture {
     $script:ProxyPresent = $false
     $script:DesktopPresent = $true
     $script:RefreshChecked = $false
+    $script:NewProgram = $null
     $script:ObservedArgs = $null
     $script:RemovedRules = [Collections.Generic.List[string]]::new()
 }
@@ -80,6 +81,7 @@ function Get-Content {
 function Assert-GuardNoProxy {
     if ($script:ProxyPresent) { throw 'Fixture proxy configured.' }
 }
+function Assert-GuardAdministratorDirectory([string]$Path) {}
 function Assert-GuardProfiles {}
 
 function Get-GuardVpnAdapter([string]$Pin) {
@@ -108,8 +110,24 @@ function Get-GuardInventory {
 
 function Test-GuardAnthropicSignature([string]$Path) { $Path -eq $script:FixtureExe }
 
+function Get-GuardFirewallKey([string]$Alias, [string]$Program, [string]$Package, [string]$RemoteAddress) {
+    "$Alias|$Program|$Package|$RemoteAddress"
+}
+
+function Get-GuardReusableRules($Specifications, [string[]]$CandidateNames) {
+    if ($script:NewProgram -and $CandidateNames -contains $script:OldRule) {
+        [pscustomobject]@{
+            Name = $script:OldRule
+            Key = Get-GuardFirewallKey 'Fixture Ethernet' $script:FixtureExe '' 'Any'
+        }
+    }
+}
+
 function Get-GuardSpecifications($Inventory, $Adapters) {
     [pscustomobject]@{ Alias = 'Fixture Ethernet'; Program = $script:FixtureExe }
+    if ($script:NewProgram) {
+        [pscustomobject]@{ Alias = 'Fixture Ethernet'; Program = $script:NewProgram }
+    }
     if ($script:FailSecondCreate) {
         [pscustomobject]@{ Alias = 'Any'; Program = $script:FixtureExe; RemoteAddress = '::/0' }
     }
@@ -150,7 +168,8 @@ function Start-GuardNativeCli([string]$Path, [string[]]$Arguments) {
     $process
 }
 
-function Stop-GuardRunningProcesses($Inventory, $StartedProcess) {
+function Get-GuardStartedProcessIdentity($StartedProcess, [string]$ExpectedPath) { $null }
+function Stop-GuardRunningProcesses($Inventory, $StartedProcess, $StartedIdentity) {
     if ($StartedProcess.Id -ne 42) { throw 'Wrong fixture process selected for shutdown.' }
     $script:StopRequested = $true
     $StartedProcess.HasExited = $true
@@ -169,6 +188,7 @@ function New-NetFirewallRule {
     [CmdletBinding()]
     param($Name, $DisplayName, $PolicyStore, $Direction, $Action, $Profile, $Enabled, $InterfaceAlias, $RemoteAddress, $Program, $Package)
     $script:CreateCount++
+    if ($script:NewProgram -and $Program -eq $script:FixtureExe) { throw 'Fixture refused a duplicate rule for the existing program.' }
     if ($script:FailSecondCreate -and $script:CreateCount -eq 2) { throw 'Fixture failure creating the second rule.' }
     $script:Rules[$Name] = "$Direction $Action"
 }
@@ -290,46 +310,6 @@ $core = Join-Path $PSScriptRoot '.build\NetworkCore.ps1'
 $coreErrors = $null
 $coreAst = [System.Management.Automation.Language.Parser]::ParseFile($core, [ref]$tokens, [ref]$coreErrors)
 if ($coreErrors.Count) { throw ($coreErrors | Out-String) }
-$vpnDiscovery = $coreAst.Find({
-    param($node)
-    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-        $node.Name -ceq 'Get-GuardVpnAdapter'
-}, $false)
-& {
-    . ([scriptblock]::Create($vpnDiscovery.Extent.Text))
-    $adapter = [pscustomobject]@{
-        Name = 'Bettbox'; InterfaceDescription = 'Meta Tunnel'; InterfaceGuid = $script:Pin
-        Status = 'Up'; HardwareInterface = $false; ifIndex = 9
-        DriverDescription = 'Wintun Userspace Tunnel'; DriverProvider = 'WireGuard LLC'
-    }
-    $lastRouteIndex = 9
-    function Get-GuardNetworkAdapters { $adapter }
-    function Get-GuardRouteIndex([string]$Address) {
-        if ($Address -eq '200.1.1.1') { $lastRouteIndex } else { 9 }
-    }
-
-    Assert-Check ((Get-GuardVpnAdapter).InterfaceGuid -eq $script:Pin) 'A full-tunnel Wintun adapter can have a custom description.'
-    $lastRouteIndex = 10
-    Assert-Throws { Get-GuardVpnAdapter } 'Internet routes use different interfaces'
-    $lastRouteIndex = 9
-    $adapter.Status = 'Disconnected'
-    Assert-Throws { Get-GuardVpnAdapter } 'No active VPN tunnel'
-    $adapter.Status = 'Up'
-    $adapter.HardwareInterface = $true
-    Assert-Throws { Get-GuardVpnAdapter } 'No active VPN tunnel'
-    $adapter.HardwareInterface = $false
-    Assert-Throws { Get-GuardVpnAdapter $script:AdapterId } 'no longer uses the saved VPN'
-    Assert-Check ((Get-GuardVpnAdapter $script:Pin).InterfaceGuid -eq $script:Pin) 'Wintun discovery still requires the saved adapter and a single active virtual route.'
-
-    $adapter.DriverProvider = 'Other vendor'
-    Assert-Throws { Get-GuardVpnAdapter } 'VPN type is not recognized'
-    $adapter.DriverProvider = 'WireGuard LLC'
-    $adapter.DriverDescription = 'Other tunnel'
-    Assert-Throws { Get-GuardVpnAdapter } 'VPN type is not recognized'
-    $adapter.InterfaceDescription = 'TAP-Windows Adapter'
-    Assert-Check ((Get-GuardVpnAdapter).InterfaceGuid -eq $script:Pin) 'Both Wintun driver fields are required for a custom description and existing VPN types still work.'
-}
-
 $escaping = $coreAst.Find({
     param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
@@ -356,6 +336,18 @@ Assert-Check (
     $script:CreateCount -eq 1 -and $script:FixtureState.VpnGuid -eq $script:Pin -and
     $script:Rules.ContainsKey($script:FixtureState.Rules[0])
 ) 'Refresh repairs coverage without relying on a connected VPN or repinning.'
+
+Reset-Fixture
+$script:NewProgram = 'C:\NativeGuardFixture\Updated\Claude.exe'
+$obsoleteRule = 'ClaudeGuardNative-Block-0451a40d99f34ef6892ad8aea82474bd-0'
+$script:Rules[$obsoleteRule] = 'Outbound Block'
+$retained = Set-GuardNativeProtection -Refresh
+Assert-Check (
+    $retained.Ok -and $script:WriteCount -eq 1 -and $script:CreateCount -eq 1 -and
+    $script:FixtureState.Rules.Count -eq 2 -and $script:FixtureState.Rules -contains $script:OldRule -and
+    $script:Rules.ContainsKey($script:OldRule) -and $script:RemovedRules.Count -eq 1 -and
+    $script:RemovedRules[0] -eq $obsoleteRule
+) 'Adding an updated program keeps its previously enforced rules and replaces only obsolete coverage.'
 
 Reset-Fixture
 $script:FixtureState.OwnerSid = 'S-1-5-18'

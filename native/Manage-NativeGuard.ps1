@@ -11,7 +11,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$version = '1.0.10'
+$version = '1.0.11'
 $taskName = 'Claude Guard Native Refresh'
 $taskPath = '\'
 $files = [ordered]@{
@@ -231,7 +231,7 @@ try {
     }
 
     if (-not (Test-Path -LiteralPath $installDirectory)) {
-        if ($RemoveRules) { throw 'The trusted console executable is required to remove the preview rules.' }
+        if ($RemoveRules) { throw 'The trusted console executable is required to remove the Native Guard rules.' }
         Write-Output "Native Guard $version is already absent."
         return
     }
@@ -249,7 +249,7 @@ try {
     if ($RemoveRules) {
         Assert-ProtectedItem $consolePath $false
         & $consolePath '--remove-rules'
-        if ($LASTEXITCODE -ne 0) { throw 'Preview rule removal failed. Installed files were retained for retry.' }
+        if ($LASTEXITCODE -ne 0) { throw 'Native Guard rule removal failed. Installed files were retained for retry.' }
     }
     foreach ($item in $contents) { [IO.File]::Delete($item.FullName) }
     [IO.Directory]::Delete($installDirectory)

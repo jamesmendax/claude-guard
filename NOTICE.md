@@ -2,9 +2,11 @@
 
 The GPL-3.0 license at the repository root applies to the original Claude Guard components. Third-party material retains its applicable terms.
 
+Native Guard 1.0.11 uses project-owned routing, application inventory, and firewall code with the Windows inbox APIs. Its build uses the files in the Native Guard source folder and the Windows .NET Framework compiler. The table below records dependencies of earlier local builds and historical design references.
+
 | Component | Terms and provenance |
 | --- | --- |
-| gruskry/claude-vpn-guard | The complete 1.0.4 build uses eight inherited scripts from v1.4.4. Native Guard 1.0.10 extracts selected functions from the same pinned source ZIP during a local build. The pinned revision lacks a published redistribution license. Builds containing those functions and the upstream ZIP remain separate from the public repository pending confirmation of the terms. [Pinned source](https://github.com/gruskry/claude-vpn-guard/tree/806d9489c8743363cbf64adf8f6284577adf13f8) |
+| gruskry/claude-vpn-guard | The complete 1.0.4 build uses eight inherited scripts from v1.4.4. Native Guard versions through 1.0.10 extracted selected functions from the same pinned source ZIP during local builds. The pinned revision lacks a published redistribution license. Builds containing those functions and the upstream ZIP remain separate from the public repository pending confirmation of the terms. [Pinned source](https://github.com/gruskry/claude-vpn-guard/tree/806d9489c8743363cbf64adf8f6284577adf13f8) |
 | Claude-Guardian | Design reference. Its published license is GPL-3.0-only. [Project](https://github.com/DUNHKpcc/Claude-Guardian) |
 | Mihomo | The full installer uses version 1.19.30. [Sources and component licenses](https://github.com/MetaCubeX/mihomo/releases/tag/v1.19.30) |
 | Sandboxie | The public template is from version 1.19.1. The original project distributes the applicable GPL-3.0 core terms and third-party notices. [Sources and notices](https://github.com/sandboxie-plus/Sandboxie/releases/tag/v1.19.1) |

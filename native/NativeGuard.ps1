@@ -12,9 +12,6 @@ $script:ProgramDataRoot = [Environment]::GetFolderPath('CommonApplicationData')
 $script:GuardFolder = Join-Path $script:ProgramDataRoot 'ClaudeGuardNative'
 $script:GuardState = Join-Path $script:GuardFolder 'firewall.json'
 
-# Discover supported local installations without accepting an arbitrary launch target.
-function Get-GuardCustomDesktopPath { return $null }
-
 function New-GuardResult([string]$Message = 'Checking local protection.') {
     [pscustomobject]@{
         Ok = $true
@@ -29,10 +26,12 @@ function New-GuardResult([string]$Message = 'Checking local protection.') {
 }
 
 function Assert-GuardNativeFolder {
-    $item = Get-Item -LiteralPath $script:GuardFolder -Force -ErrorAction SilentlyContinue
+    try { $item = Get-Item -LiteralPath $script:GuardFolder -Force -ErrorAction Stop }
+    catch [System.Management.Automation.ItemNotFoundException] { return }
     if ($item -and (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint))) {
         throw 'The native firewall state directory is not a regular directory.'
     }
+    Assert-GuardAdministratorDirectory $script:GuardFolder
 }
 
 function Read-GuardNativeState {
@@ -65,7 +64,7 @@ function Get-GuardNativeOwner {
 function Assert-GuardNoDailyPolicy {
     $daily = Join-Path $script:ProgramDataRoot 'ClaudeVPNGuard\daily-mode.json'
     if (Test-Path -LiteralPath $daily) {
-        throw 'The installed Daily Guard policy is still configured. This preview cannot verify a native launch while that separate policy is present.'
+        throw 'The installed Daily Guard policy is still configured. Native Guard cannot verify a native launch while that separate policy is present.'
     }
 }
 
@@ -227,11 +226,14 @@ function Save-GuardNativeState($State) {
 }
 
 function Remove-GuardNativeRules([string[]]$Names) {
+    if (!$Names.Count) { return }
+    $owned = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($name in $Names) {
         if ($name -cnotmatch '^ClaudeGuardNative-Block-[a-f0-9]{32}-[0-9]+$') { throw 'Unexpected rule identity.' }
-        $rule = Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction SilentlyContinue
-        if ($rule) { $rule | Remove-NetFirewallRule -ErrorAction Stop }
+        $null = $owned.Add($name)
     }
+    $rules = @(Get-GuardRules | Where-Object { $owned.Contains($_.Name) })
+    if ($rules.Count) { $rules | Remove-NetFirewallRule -ErrorAction Stop }
 }
 
 function Set-GuardNativeProtection([switch]$Refresh) {
@@ -268,10 +270,21 @@ function Set-GuardNativeProtection([switch]$Refresh) {
         }
         $generation = [guid]::NewGuid().ToString('N')
         $previousRules = @(Get-GuardRules | Where-Object Name -cmatch '^ClaudeGuardNative-Block-[a-f0-9]{32}-[0-9]+$' | Select-Object -ExpandProperty Name)
+        $reusable = @{}
+        foreach ($match in Get-GuardReusableRules $context.Rules $previousRules) {
+            $reusable[$match.Key] = $match.Name
+        }
+        $selected = [Collections.Generic.List[string]]::new()
         $staged = [Collections.Generic.List[string]]::new()
         $committed = $false
         try {
             foreach ($spec in $context.Rules) {
+                $remote = if ($spec.RemoteAddress) { $spec.RemoteAddress } else { 'Any' }
+                $key = Get-GuardFirewallKey $spec.Alias $spec.Program $spec.Package $remote
+                if ($reusable.ContainsKey($key)) {
+                    $selected.Add($reusable[$key])
+                    continue
+                }
                 $name = "$script:GuardRulePrefix-$generation-$($staged.Count)"
                 $params = @{
                     Name = $name
@@ -288,8 +301,9 @@ function Set-GuardNativeProtection([switch]$Refresh) {
                 if ($spec.Program) { $params.Program = $spec.Program } else { $params.Package = $spec.Package }
                 $staged.Add($name)
                 New-NetFirewallRule @params | Out-Null
+                $selected.Add($name)
             }
-            Assert-GuardCoverage $context.Rules $staged.ToArray() -DuringRefresh
+            Assert-GuardCoverage $context.Rules $selected.ToArray() -DuringRefresh
             $current = Get-GuardNativeContext ([string]$context.Vpn.InterfaceGuid) -Setup -AllowVpnDown:$Refresh
             if ((Get-GuardNativeFingerprint $current) -cne (Get-GuardNativeFingerprint $context)) {
                 throw 'The VPN, adapter inventory or Claude installation changed during setup.'
@@ -301,7 +315,7 @@ function Set-GuardNativeProtection([switch]$Refresh) {
                 Version = 1
                 OwnerSid = Get-GuardNativeOwner
                 VpnGuid = [string]$context.Vpn.InterfaceGuid
-                Rules = $staged.ToArray()
+                Rules = $selected.ToArray()
                 Adapters = @($context.Adapters | ForEach-Object {
                     [pscustomobject]@{ Guid = [string]$_.InterfaceGuid; Alias = $_.Name }
                 })
@@ -311,7 +325,7 @@ function Set-GuardNativeProtection([switch]$Refresh) {
         } finally {
             if (-not $committed) { Remove-GuardNativeRules $staged.ToArray() }
         }
-        if ($previousRules.Count) { Remove-GuardNativeRules $previousRules }
+        Remove-GuardNativeRules @($previousRules | Where-Object { !$selected.Contains($_) })
         $current = Get-GuardNativeContext ([string]$state.VpnGuid) -Setup -AllowVpnDown:$Refresh
         Assert-GuardNativeCoverage $state $current
         if ($Refresh) {
@@ -357,6 +371,7 @@ function Invoke-GuardNativeDesktop([switch]$Cli, [string]$Zone, [string[]]$Argum
     }
     $snapshot = Get-GuardNativeFingerprint $context
     $started = $null
+    $startedIdentity = $null
     $exitCode = 0
     try {
         Start-GuardSessionZone $Zone
@@ -374,6 +389,7 @@ function Invoke-GuardNativeDesktop([switch]$Cli, [string]$Zone, [string[]]$Argum
             $started = Start-Process -FilePath $context.Desktop.Path -PassThru -ErrorAction Stop
         }
         if (-not $started) { throw 'Windows did not start the guarded process.' }
+        $startedIdentity = Get-GuardStartedProcessIdentity $started $context.Desktop.Path
         $clock = [Diagnostics.Stopwatch]::StartNew()
         $seen = $false
         do {
@@ -397,7 +413,7 @@ function Invoke-GuardNativeDesktop([switch]$Cli, [string]$Zone, [string[]]$Argum
         } while ($true)
     } catch {
         if ($started) {
-            try { Stop-GuardRunningProcesses $context.Inventory $started }
+            try { Stop-GuardRunningProcesses $context.Inventory $started $startedIdentity }
             catch { throw ('Protection verification failed and Claude may still be open. ' + $_.Exception.Message) }
         }
         throw
