@@ -1,0 +1,421 @@
+param(
+    [ValidateSet('Status','StatusCli','Configure','Launch','LaunchCli','Refresh','RemoveRules')][string]$Mode,
+    [string]$TimeZoneId,
+    [string[]]$CliArguments
+)
+
+$ErrorActionPreference = 'Stop'
+$script:GuardRulePrefix = 'ClaudeGuardNative-Block'
+$script:GuardSignatureCache = @{}
+$script:GuardShutdownConfirmSeconds = 5
+$script:ProgramDataRoot = [Environment]::GetFolderPath('CommonApplicationData')
+$script:GuardFolder = Join-Path $script:ProgramDataRoot 'ClaudeGuardNative'
+$script:GuardState = Join-Path $script:GuardFolder 'firewall.json'
+
+# Discover supported local installations without accepting an arbitrary launch target.
+function Get-GuardCustomDesktopPath { return $null }
+
+function New-GuardResult([string]$Message = 'Checking local protection.') {
+    [pscustomobject]@{
+        Ok = $true
+        Ready = $false
+        CanConfigure = $false
+        Route = 'Not checked'
+        Firewall = 'Not checked'
+        Claude = 'Not checked'
+        Message = $Message
+        ExitCode = 0
+    }
+}
+
+function Assert-GuardNativeFolder {
+    $item = Get-Item -LiteralPath $script:GuardFolder -Force -ErrorAction SilentlyContinue
+    if ($item -and (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint))) {
+        throw 'The native firewall state directory is not a regular directory.'
+    }
+}
+
+function Read-GuardNativeState {
+    Assert-GuardNativeFolder
+    if (-not (Test-Path -LiteralPath $script:GuardState -PathType Leaf)) { return $null }
+    $file = Get-Item -LiteralPath $script:GuardState -Force
+    if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $file.Length -gt 1MB) {
+        throw 'The native firewall state file could not be trusted.'
+    }
+    $state = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
+    $pin = [guid]::Empty
+    $names = @($state.Rules)
+    if ($state.Version -ne 1 -or -not [guid]::TryParse([string]$state.VpnGuid, [ref]$pin) -or
+        $pin -eq [guid]::Empty -or -not $names.Count -or
+        @($names | Where-Object { $_ -cnotmatch '^ClaudeGuardNative-Block-[a-f0-9]{32}-[0-9]+$' }).Count -or
+        @($names | Sort-Object -Unique).Count -ne $names.Count) {
+        throw 'The native firewall state file is incomplete or invalid.'
+    }
+    if ($state.OwnerSid -and $state.OwnerSid -cne (Get-GuardNativeOwner)) {
+        throw 'This native firewall policy belongs to another Windows user.'
+    }
+    $state
+}
+
+function Get-GuardNativeOwner {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    try { $identity.User.Value } finally { $identity.Dispose() }
+}
+
+function Assert-GuardNoDailyPolicy {
+    $daily = Join-Path $script:ProgramDataRoot 'ClaudeVPNGuard\daily-mode.json'
+    if (Test-Path -LiteralPath $daily) {
+        throw 'The installed Daily Guard policy is still configured. This preview cannot verify a native launch while that separate policy is present.'
+    }
+}
+
+function Get-GuardNativeDesktop($Inventory) {
+    $paths = @($Inventory.DesktopPaths | Where-Object { (Split-Path -Leaf $_) -ieq 'Claude.exe' })
+    foreach ($path in $paths) {
+        if (-not (Test-GuardAnthropicSignature $path)) { continue }
+        $registered = @($Inventory.Packages | Where-Object {
+            $path.StartsWith($_.Root.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($registered.Count -gt 1) { throw 'More than one Store package matched Claude.' }
+        $appId = $null
+        if ($registered.Count -eq 1) {
+            $family = $registered[0].Family
+            $package = @(Get-AppxPackage -ErrorAction Stop | Where-Object PackageFamilyName -eq $family)
+            if ($package.Count -ne 1) { throw 'Claude Store registration changed.' }
+            $manifest = Get-AppxPackageManifest -Package $package[0].PackageFullName -ErrorAction Stop
+            $entry = @($manifest.Package.Applications.Application | Where-Object {
+                $_.Id -and $_.Executable -and ([IO.Path]::GetFullPath((Join-Path $package[0].InstallLocation $_.Executable)) -ieq $path)
+            })
+            if ($entry.Count -ne 1) { continue }
+            $appId = "$family!$($entry[0].Id)"
+        }
+        [pscustomobject]@{ Path = $path; AppId = $appId }
+        return
+    }
+    throw 'No supported, publisher-verified Claude Desktop installation was found.'
+}
+
+function Get-GuardNativeCli($Inventory) {
+    if (-not $Inventory.CliPath -or $Inventory.Programs -notcontains $Inventory.CliPath -or
+        -not (Test-GuardAnthropicSignature $Inventory.CliPath)) {
+        throw 'No supported, publisher-verified native Claude Code executable was found on PATH.'
+    }
+    [pscustomobject]@{ Path = $Inventory.CliPath; AppId = $null }
+}
+
+function Get-GuardNativeContext([string]$Pin, $Status, [switch]$Cli, [switch]$Setup, [switch]$AllowVpnDown) {
+    if ($AllowVpnDown) {
+        if (-not $Pin) { throw 'A saved VPN is required for background refresh.' }
+        $vpn = Get-GuardPinnedVpnAdapter $Pin
+    } else {
+        Assert-GuardNoProxy
+        $vpn = Get-GuardVpnAdapter $Pin
+    }
+    if ($Status) { $Status.Route = 'VPN route verified' }
+    $adapters = @(Get-GuardBlockedAdapters $vpn -AllowVpnDown:$AllowVpnDown)
+    if (-not $adapters.Count) { throw 'Windows did not expose the other interfaces for verification.' }
+    $inventory = Get-GuardInventory
+    if ($Cli) {
+        $desktop = Get-GuardNativeCli $inventory
+    } elseif ($Setup) {
+        try { $desktop = Get-GuardNativeDesktop $inventory }
+        catch { $desktop = Get-GuardNativeCli $inventory }
+    } else {
+        $desktop = Get-GuardNativeDesktop $inventory
+    }
+    if ($Status) { $Status.Claude = if ($Cli) { 'Claude Code verified' } else { 'Desktop verified' } }
+    $specifications = @(Get-GuardSpecifications $inventory $adapters)
+    if (-not $specifications.Count) { throw 'No Claude firewall coverage could be determined.' }
+    [pscustomobject]@{ Vpn = $vpn; Adapters = $adapters; Inventory = $inventory; Desktop = $desktop; Rules = $specifications }
+}
+
+function Get-GuardNativeFingerprint($Context) {
+    $parts = @([string]$Context.Vpn.InterfaceGuid, [string]$Context.Desktop.Path, [string]$Context.Desktop.AppId)
+    $parts += @($Context.Adapters | ForEach-Object {
+        '{0}|{1}|{2}|{3}' -f $_.InterfaceGuid, $_.Name, $_.Status, $_.Ipv4Present
+    } | Sort-Object)
+    $parts += @($Context.Rules | ForEach-Object {
+        '{0}|{1}|{2}|{3}' -f $_.Alias, $_.Program, $_.Package, $_.RemoteAddress
+    } | Sort-Object)
+    $parts -join [Environment]::NewLine
+}
+
+function Assert-GuardNativeCoverage($State, $Context) {
+    Assert-GuardProfiles
+    foreach ($adapter in $Context.Adapters) {
+        if ($adapter.Ipv4Present -eq $false) { continue }
+        if (-not @($State.Adapters | Where-Object { $_.Guid -eq "$($adapter.InterfaceGuid)" -and $_.Alias -eq $adapter.Name }).Count) {
+            throw 'A network interface changed since the native rules were applied.'
+        }
+    }
+    Assert-GuardCoverage $Context.Rules @($State.Rules)
+}
+
+function Get-GuardNativeStatus([switch]$Cli) {
+    $answer = New-GuardResult
+    try {
+        $state = Read-GuardNativeState
+        Assert-GuardNoDailyPolicy
+        $context = Get-GuardNativeContext '' $answer -Cli:$Cli
+        Assert-GuardProfiles
+        if (@(Get-GuardRunningProcesses $context.Inventory).Count) {
+            $answer.Claude = 'Already running'
+            throw 'Close the existing Claude session before starting or setting up this guard.'
+        }
+        $answer.CanConfigure = $true
+        if (-not $state) {
+            $answer.Firewall = 'Setup required'
+            $answer.Message = 'Set up the scoped Windows Firewall rules to enable guarded launch.'
+            return $answer
+        }
+        if ([guid]$state.VpnGuid -ne [guid]$context.Vpn.InterfaceGuid) {
+            $answer.Firewall = 'Setup required'
+            $answer.Message = 'The VPN changed. Confirm firewall setup for the new route before launching.'
+            return $answer
+        }
+        Assert-GuardNativeCoverage $state $context
+        $answer.Firewall = 'Effective blocks verified'
+        $answer.Ready = $true
+        $answer.Message = 'The verified local route and rules are ready for a guarded launch.'
+    } catch {
+        if ($answer.Route -eq 'Not checked') { $answer.Route = 'Unverified' }
+        if ($answer.Firewall -eq 'Not checked') { $answer.Firewall = 'Unverified' }
+        $answer.Message = $_.Exception.Message
+    }
+    $answer
+}
+
+function Save-GuardNativeState($State) {
+    Assert-GuardNativeFolder
+    Initialize-GuardAdministratorDirectory $script:GuardFolder
+    $temp = Join-Path $script:GuardFolder ('state-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        [IO.File]::WriteAllText($temp, ($State | ConvertTo-Json -Depth 5 -Compress))
+        if ([IO.File]::Exists($script:GuardState)) {
+            [IO.File]::Replace($temp, $script:GuardState, $null)
+        } else {
+            [IO.File]::Move($temp, $script:GuardState)
+        }
+    } finally {
+        if ([IO.File]::Exists($temp)) { [IO.File]::Delete($temp) }
+    }
+}
+
+function Remove-GuardNativeRules([string[]]$Names) {
+    foreach ($name in $Names) {
+        if ($name -cnotmatch '^ClaudeGuardNative-Block-[a-f0-9]{32}-[0-9]+$') { throw 'Unexpected rule identity.' }
+        $rule = Get-NetFirewallRule -PolicyStore PersistentStore -Name $name -ErrorAction SilentlyContinue
+        if ($rule) { $rule | Remove-NetFirewallRule -ErrorAction Stop }
+    }
+}
+
+function Set-GuardNativeProtection([switch]$Refresh) {
+    $mutex = [Threading.Mutex]::new($false, 'Global\ClaudeGuardNativeFirewallSetup')
+    $owned = $false
+    try {
+        try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
+        if (-not $owned) { throw 'Another firewall setup is in progress.' }
+        Assert-GuardNoDailyPolicy
+        Assert-GuardProfiles
+        $previous = Read-GuardNativeState
+        # Setup is an explicit user action. Inspect the current VPN rather than silently preserving a stale selection.
+        if ($Refresh -and -not $previous) {
+            return (New-GuardResult 'No saved native firewall policy is available to refresh.')
+        }
+        if ($Refresh -and -not $previous.OwnerSid) {
+            throw 'Run firewall setup once to record the Windows account that owns this policy.'
+        }
+        $pin = if ($Refresh) { [string]$previous.VpnGuid } else { '' }
+        $context = Get-GuardNativeContext $pin -Setup -AllowVpnDown:$Refresh
+        if (@(Get-GuardRunningProcesses $context.Inventory).Count) {
+            if ($Refresh) { return (New-GuardResult 'Refresh deferred while Claude is running.') }
+            throw 'Close Claude before applying native firewall rules.'
+        }
+        if ($Refresh) {
+            try {
+                Assert-GuardNativeCoverage $previous $context
+                $answer = New-GuardResult 'Saved rule coverage passed its background check.'
+                $answer.Firewall = 'Effective blocks verified'
+                return $answer
+            } catch {
+                # The saved native scope stays active until the replacement has passed verification.
+            }
+        }
+        $generation = [guid]::NewGuid().ToString('N')
+        $previousRules = @(Get-GuardRules | Where-Object Name -cmatch '^ClaudeGuardNative-Block-[a-f0-9]{32}-[0-9]+$' | Select-Object -ExpandProperty Name)
+        $staged = [Collections.Generic.List[string]]::new()
+        $committed = $false
+        try {
+            foreach ($spec in $context.Rules) {
+                $name = "$script:GuardRulePrefix-$generation-$($staged.Count)"
+                $params = @{
+                    Name = $name
+                    DisplayName = "Claude Guard Native: block on $($spec.Alias)"
+                    PolicyStore = 'PersistentStore'
+                    Direction = 'Outbound'
+                    Action = 'Block'
+                    Profile = 'Any'
+                    Enabled = 'True'
+                    ErrorAction = 'Stop'
+                }
+                if ($spec.Alias -ne 'Any') { $params.InterfaceAlias = $spec.Alias }
+                if ($spec.RemoteAddress) { $params.RemoteAddress = $spec.RemoteAddress }
+                if ($spec.Program) { $params.Program = $spec.Program } else { $params.Package = $spec.Package }
+                $staged.Add($name)
+                New-NetFirewallRule @params | Out-Null
+            }
+            Assert-GuardCoverage $context.Rules $staged.ToArray() -DuringRefresh
+            $current = Get-GuardNativeContext ([string]$context.Vpn.InterfaceGuid) -Setup -AllowVpnDown:$Refresh
+            if ((Get-GuardNativeFingerprint $current) -cne (Get-GuardNativeFingerprint $context)) {
+                throw 'The VPN, adapter inventory or Claude installation changed during setup.'
+            }
+            if (@(Get-GuardRunningProcesses $current.Inventory).Count) {
+                throw 'A Claude session appeared during firewall setup.'
+            }
+            $state = [pscustomobject]@{
+                Version = 1
+                OwnerSid = Get-GuardNativeOwner
+                VpnGuid = [string]$context.Vpn.InterfaceGuid
+                Rules = $staged.ToArray()
+                Adapters = @($context.Adapters | ForEach-Object {
+                    [pscustomobject]@{ Guid = [string]$_.InterfaceGuid; Alias = $_.Name }
+                })
+            }
+            Save-GuardNativeState $state
+            $committed = $true
+        } finally {
+            if (-not $committed) { Remove-GuardNativeRules $staged.ToArray() }
+        }
+        if ($previousRules.Count) { Remove-GuardNativeRules $previousRules }
+        $current = Get-GuardNativeContext ([string]$state.VpnGuid) -Setup -AllowVpnDown:$Refresh
+        Assert-GuardNativeCoverage $state $current
+        if ($Refresh) {
+            $answer = New-GuardResult 'Rules refreshed for the saved VPN.'
+            $answer.Firewall = 'Effective blocks verified'
+            return $answer
+        }
+        $answer = Get-GuardNativeStatus
+        if (-not $answer.Ready) { $answer = Get-GuardNativeStatus -Cli }
+        if ($answer.Ready) { return $answer }
+        $answer.Firewall = 'Rules applied'
+        $answer.Ok = $true
+        $answer.Message = 'Windows applied the scoped rules. Check the launch status again. ' + $answer.Message
+        $answer
+    } finally {
+        if ($owned) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
+}
+
+function Remove-GuardNativeProtection {
+    $null = Read-GuardNativeState
+    if (@(Get-GuardRunningProcesses (Get-GuardInventory)).Count) {
+        throw 'Close Claude before removing the native rules.'
+    }
+    $names = @(Get-GuardRules | Where-Object Name -cmatch '^ClaudeGuardNative-Block-[a-f0-9]{32}-[0-9]+$' | Select-Object -ExpandProperty Name)
+    Remove-GuardNativeRules $names
+    if (@(Get-GuardRules | Where-Object Name -cmatch '^ClaudeGuardNative-Block-[a-f0-9]{32}-[0-9]+$').Count) {
+        throw 'Some native firewall rules could not be removed.'
+    }
+    if ([IO.File]::Exists($script:GuardState)) { [IO.File]::Delete($script:GuardState) }
+    New-GuardResult 'Native firewall rules removed.'
+}
+
+function Invoke-GuardNativeDesktop([switch]$Cli, [string]$Zone, [string[]]$Arguments) {
+    Assert-GuardNoDailyPolicy
+    $state = Read-GuardNativeState
+    if (-not $state) { throw 'The native firewall rules need to be set up before launch.' }
+    $context = Get-GuardNativeContext ([string]$state.VpnGuid) -Cli:$Cli
+    Assert-GuardNativeCoverage $state $context
+    if (@(Get-GuardRunningProcesses $context.Inventory).Count) {
+        throw 'Close the existing Claude session before opening a guarded one.'
+    }
+    $snapshot = Get-GuardNativeFingerprint $context
+    $started = $null
+    $exitCode = 0
+    try {
+        Start-GuardSessionZone $Zone
+        $beforeLaunch = Get-GuardNativeContext ([string]$state.VpnGuid) -Cli:$Cli
+        if ((Get-GuardNativeFingerprint $beforeLaunch) -cne $snapshot) {
+            throw 'The route, adapter inventory or Claude installation changed before launch.'
+        }
+        Assert-GuardNativeCoverage $state $beforeLaunch
+        if ($Cli) {
+            $started = Start-GuardNativeCli $context.Desktop.Path $Arguments
+        } elseif ($context.Desktop.AppId) {
+            $id = Start-GuardWindowsApplication $context.Desktop.AppId ''
+            $started = Get-Process -Id $id -ErrorAction Stop
+        } else {
+            $started = Start-Process -FilePath $context.Desktop.Path -PassThru -ErrorAction Stop
+        }
+        if (-not $started) { throw 'Windows did not start the guarded process.' }
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        $seen = $false
+        do {
+            if ($Cli -and $started.HasExited) {
+                $exitCode = $started.ExitCode
+                break
+            }
+            $running = @(Get-GuardRunningProcesses $context.Inventory)
+            if ($running.Count) { $seen = $true }
+            if (-not $running.Count -and $started.HasExited -and $seen) { break }
+            if (-not $seen -and $clock.Elapsed.TotalSeconds -gt 15) {
+                throw 'The Claude process could not be confirmed after startup.'
+            }
+            Assert-GuardNoDailyPolicy
+            $current = Get-GuardNativeContext ([string]$state.VpnGuid) -Cli:$Cli
+            if ((Get-GuardNativeFingerprint $current) -cne $snapshot) {
+                throw 'The route, adapter inventory or Claude installation changed during this session.'
+            }
+            Assert-GuardNativeCoverage $state $current
+            Start-Sleep -Milliseconds 1000
+        } while ($true)
+    } catch {
+        if ($started) {
+            try { Stop-GuardRunningProcesses $context.Inventory $started }
+            catch { throw ('Protection verification failed and Claude may still be open. ' + $_.Exception.Message) }
+        }
+        throw
+    } finally {
+        try { Restore-GuardSessionZone }
+        finally { if ($started) { $started.Dispose() } }
+    }
+    if ($Cli) {
+        $answer = New-GuardResult 'The guarded Claude Code session ended.'
+        $answer.ExitCode = $exitCode
+        return $answer
+    }
+    $answer = Get-GuardNativeStatus
+    if ($answer.Ready) { $answer.Message = 'The guarded Claude session ended.' }
+    $answer
+}
+
+function Get-GuardNativeCliCommandLine([string[]]$Arguments) {
+    $escaped = foreach ($argument in $Arguments) { ConvertTo-GuardNativeArgument $argument }
+    $escaped -join ' '
+}
+
+function Start-GuardNativeCli([string]$Path, [string[]]$Arguments) {
+    $info = [Diagnostics.ProcessStartInfo]::new($Path)
+    $info.UseShellExecute = $false
+    $info.WorkingDirectory = (Get-Location).ProviderPath
+    $info.Arguments = Get-GuardNativeCliCommandLine $Arguments
+    [Diagnostics.Process]::Start($info)
+}
+
+try {
+    switch ($Mode) {
+        'Status' { Get-GuardNativeStatus }
+        'StatusCli' { Get-GuardNativeStatus -Cli }
+        'Configure' { Set-GuardNativeProtection }
+        'Launch' { Invoke-GuardNativeDesktop -Zone $TimeZoneId }
+        'LaunchCli' { Invoke-GuardNativeDesktop -Cli -Zone $TimeZoneId -Arguments $CliArguments }
+        'Refresh' { Set-GuardNativeProtection -Refresh }
+        'RemoveRules' { Remove-GuardNativeProtection }
+    }
+} catch {
+    $answer = New-GuardResult $_.Exception.Message
+    $answer.Ok = $false
+    $answer.Firewall = 'Unverified'
+    $answer
+}
