@@ -3,6 +3,14 @@
 param()
 
 $ErrorActionPreference = 'Stop'
+
+# Compiled Native Guard assemblies target Windows inbox .NET Framework 4.8 (including System.Web.Extensions).
+# When invoked from PowerShell 7 (.NET Core), delegate transparently to Windows PowerShell 5.1.
+if ($PSVersionTable.PSEdition -ne 'Desktop') {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath
+    exit $LASTEXITCODE
+}
+
 $script:Checks = 0
 
 function Assert-Case([bool]$Condition, [string]$Description) {
