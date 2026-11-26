@@ -50,6 +50,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: claude-guard-native-x64
+          include-hidden-files: true
           path: |
             native/.build/ClaudeGuardNative-*-x64.exe
             native/.build/ClaudeGuardNativeConsole-*-x64.exe
