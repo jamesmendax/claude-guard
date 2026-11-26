@@ -1,71 +1,77 @@
-# Claude Guard Native 1.0.11
+# Claude Guard Native 2.0.0
 
-This folder contains the complete source for Windows x64 Native Guard. A local build produces a graphical app and a console executable for native Claude Code and maintenance commands. The network core uses the Windows routing table, signed application inventory, and effective Windows Firewall policy.
+This folder contains the complete source for Windows x64 **Native Guard 2.0.0**. A local build produces a native WPF graphical app (`ClaudeGuardNative-2.0.0-x64.exe`, ~313 KB) and a console executable (`ClaudeGuardNativeConsole-2.0.0-x64.exe`) using only Windows inbox tools — zero external SDKs or runtimes required.
 
-## VPN and launch protection
+> Read [LIMITATIONS.md](LIMITATIONS.md) for scope boundaries, policy caveats, and the distinction between offline-verified checks and live-environment verification.
 
-- **Check** inspects the current Windows route, installed application and effective firewall rules.
-- **Set up firewall** requests administrator approval and records the active full-tunnel VPN. It verifies new scoped outbound block rules before retiring the previous rule generation.
-- **Open Claude** and the tray shortcut launch the verified Claude Desktop installation under the signed-in user. The console can also launch a publisher-verified native Claude Code executable from PATH. The guard checks Windows routing and effective rules during the session. If verification fails, it attempts to stop the identified session processes.
-- **Background refresh** is opt-in. It checks at logon and every five minutes, using the saved VPN selection. When Claude is closed, it retains verified blocks and adds rules for newly discovered paths or interfaces before retiring obsolete rules. It uses the same Windows account and an administrator-protected installed executable.
-- A node or egress IP change can use the existing rules when it stays on the same verified Windows VPN adapter. If the adapter changes, close Claude and run the explicit firewall setup with the intended full-tunnel VPN connected. Run **Check** before launching.
+## What's new in 2.0.0
 
-The checks cover discovered program paths, recognized Store package identities, and the Windows interfaces visible to the guard. The launcher requires direct Windows routing through a recognized VPN adapter. A configured proxy or a separate active Daily Guard policy can block readiness.
+- **Complete Native WPF UI & Custom Identity**: Replaces the legacy WinForms interface with a modular, zero-SDK Windows inbox WPF shell (`ui/Theme.xaml`, `ui/GuardMainWindow.cs`, `ui/OverviewPage.cs`, `ui/ExitPolicyPage.cs`, `ui/DesktopHygienePage.cs`, `ui/SystemMaintenancePage.cs`) featuring a custom frameless rounded window, a live **4-node Conduit Schematic**, live `中 | EN` language switching, and the multi-resolution **Aperture Gate** `.ico` + 3-state tray LED (`assets/ClaudeGuard.ico`, `ui/AppIcons.cs`).
+- **Granular proxy / WPAD diagnostics**: Identifies the exact proxy source blocking launch (`EnvVar`, `ManualProxy`, `AutoConfig`, `AutoDetect` WPAD, or `WinHttp`) and displays an inline recovery card with a one-click **Open Windows proxy settings** button.
+- **Optional fail-closed IPv4 TLS exit verification (with weak-network jitter tolerance)**: Direct IPv4 TLS `/cdn-cgi/trace` check (default host `claude.ai`, bypassing system proxies) against user-configured allowed country codes and/or IPv4 allowlists, before launch and during guarded sessions. Explicit IP/country mismatch blocks immediately (0 retries), while transient timeouts/packet loss (e.g., HY2/CDN jitter) support configurable retry tolerance (default 3 attempts). IPv4 addresses are masked (`203.0.*.*`) by default in the UI and diagnostic reports.
+- **Event-driven + tiered session monitoring**: Registers Windows IP Helper notifications (`NotifyRouteChange2` / `NotifyIpInterfaceChange`) to wake verification immediately on route or interface changes while caching expensive disk/Store inventory scans across quiet ticks.
+- **Claude Desktop hygiene, MCP-safe quarantine & daily guardian UX**: Scans Classic and Microsoft Store MSIX Claude Desktop data directories and Windows auto-start entries (`HKCU\...\Run` and Store `StartupTask`), quarantines cache/cookies/session/logs to a 1-click restorable backup while strictly protecting `claude_desktop_config.json` (MCP config), adds auto-minimize-to-tray guarding with balloon alerts, one-click safe Claude process-tree stop (`--stop-claude`), and guarded Desktop shortcut creation (`--launch-desktop`).
+- **Live acceptance helper & optional Inno Setup script**: Adds `Verify-LiveGuard.ps1` (read-only host diagnostics + manual live-test checklist) and `installer/ClaudeGuardNative.iss`.
 
-A signed Cowork service registered by the Microsoft Store package remains in the rule inventory. Its presence as a Windows background service no longer marks Claude Desktop or Claude Code as already open.
+## Unified 4-tab desktop interface
 
-Native Guard also supports a manually selected session time zone, encrypted DNS for Windows-assigned resolvers with known templates, and diagnostic records generated by Native Guard itself.
-
-## Windows settings and diagnostics
-
-| Menu | Operation |
+| Tab | Capabilities |
 | --- | --- |
-| **Settings → Windows region and language** | Opens an independent window with the current region, regional formats, time zone, preferred languages, and default input. Choose a listed keyboard and use **Apply default input** to save and verify the default. Windows region and language, date and time, and Edge language settings have separate links. |
-| **Settings → Session time zone** | Optionally chooses the Windows time zone for a guarded session. Guard saves the original setting and restores it on exit. The next guarded launch recovers a pending change after an interruption while preserving any later manual change. |
-| **Settings → Encrypted DNS** | Allows a selected Windows-assigned resolver to use its installed DNS-over-HTTPS template. Each approved change saves the original settings for **Restore** and verifies the result. |
-| **Diagnostics → Save report** | Saves current guard status and bounded local events. Each event contains a UTC time, action and outcome. |
+| **Overview (`总览守卫`)** | Live 4-node Conduit Schematic (`Claude Desktop → Firewall Lock → VPN/TUN → Public Exit`), inline failure recovery guidance, hairline telemetry table, auto-minimize & IP reveal switches, one-click **Launch Claude Desktop**, **Launch CLI**, **Stop Claude**, and **Configure firewall**. |
+| **Exit Policy (`出口策略`)** | Enable/disable fail-closed IPv4 TLS exit checks (`claude.ai`, ISO country allowlist, dedicated VPS IPv4 allowlist with automatic masking, recheck interval, weak-network retry tolerance) plus live **Probe now** & **Add current IPv4**. |
+| **Desktop Hygiene (`桌面卫生`)** | Scan Classic & Store MSIX Claude Desktop folders, inspect Windows auto-start race risks, archive old cache/cookies/logs with strict `claude_desktop_config.json` (MCP) protection, 1-click restore from timestamped backups, and fingerprint-browser OAuth login tip. |
+| **System (`系统与维护`)** | Apply/refresh or remove Windows Firewall rules, create a guarded Desktop shortcut (`--launch-desktop`), install/disable the 5-minute background refresh task, configure optional temporary session time zone, open Windows Region/Input (`--region`) and Encrypted DNS (DoH) tools, verify SHA-256 checksums, open logs, export masked diagnostics, or uninstall. |
 
-The region and input window also launches directly with `ClaudeGuardNative-1.0.11-x64.exe --region`, including while guarded launch is unavailable.
+The standalone region and input window also launches directly with `ClaudeGuardNative-2.0.0-x64.exe --region`, and guarded Desktop auto-launch works via `ClaudeGuardNative-2.0.0-x64.exe --launch-desktop`.
 
-## Portable use
+## Portable and console use
 
-Keep the two Windows executables and `SHA256SUMS.txt` together in the download folder or use the local build output in `native/.build/`. Double-click `ClaudeGuardNative-1.0.11-x64.exe` for the main window. Run these commands from the same folder.
+Keep the two executables and `SHA256SUMS.txt` together in the download folder or `native/.build/`. Double-click `ClaudeGuardNative-2.0.0-x64.exe` for the main window, or use the console:
 
 ```powershell
-.\ClaudeGuardNativeConsole-1.0.11-x64.exe --verify-package
-.\ClaudeGuardNativeConsole-1.0.11-x64.exe --status
-.\ClaudeGuardNativeConsole-1.0.11-x64.exe --status --cli
-.\ClaudeGuardNativeConsole-1.0.11-x64.exe --desktop
-.\ClaudeGuardNativeConsole-1.0.11-x64.exe --cli
-.\ClaudeGuardNativeConsole-1.0.11-x64.exe --cli --time-zone "Tokyo Standard Time" -- --help
+.\ClaudeGuardNativeConsole-2.0.0-x64.exe --verify-package
+.\ClaudeGuardNativeConsole-2.0.0-x64.exe --status
+.\ClaudeGuardNativeConsole-2.0.0-x64.exe --status --cli
+.\ClaudeGuardNativeConsole-2.0.0-x64.exe --check-exit
+.\ClaudeGuardNativeConsole-2.0.0-x64.exe --check-exit --host claude.ai --allow-country US,JP
+.\ClaudeGuardNativeConsole-2.0.0-x64.exe --desktop
+.\ClaudeGuardNativeConsole-2.0.0-x64.exe --cli
+.\ClaudeGuardNativeConsole-2.0.0-x64.exe --cli --time-zone "Tokyo Standard Time" -- --help
+.\ClaudeGuardNativeConsole-2.0.0-x64.exe --stop-claude
 ```
-
-The status command returns exit code 0 when the requested launcher is ready. Arguments after `--` are forwarded to Claude Code, and the console returns the child exit code once the session ends.
 
 ## Optional installation and upkeep
 
-Use an elevated Windows Terminal under the same Windows account that will run the guard. The console verifies the two packaged executables and installs them in `%ProgramFiles%\Claude Guard Native\1.0.11`. Use the first command for a normal install or the second for an install with automatic refresh.
+Run from an elevated Windows Terminal under the Windows account that uses Claude (or trigger directly from the GUI **System** tab):
 
 ```powershell
-.\ClaudeGuardNativeConsole-1.0.11-x64.exe --install
-.\ClaudeGuardNativeConsole-1.0.11-x64.exe --install --enable-refresh
+.\ClaudeGuardNativeConsole-2.0.0-x64.exe --install
+.\ClaudeGuardNativeConsole-2.0.0-x64.exe --install --enable-refresh
+.\ClaudeGuardNativeConsole-2.0.0-x64.exe --disable-refresh
+.\ClaudeGuardNativeConsole-2.0.0-x64.exe --remove-rules
+.\ClaudeGuardNativeConsole-2.0.0-x64.exe --uninstall
+.\ClaudeGuardNativeConsole-2.0.0-x64.exe --uninstall --remove-rules
 ```
 
-Run maintenance from the build output folder. `--disable-refresh` disables that account's refresh task. `--uninstall` removes Native Guard 1.0.11 from Program Files. `--uninstall --remove-rules` additionally removes Native Guard's own firewall rules after confirming Claude is closed. Guard keeps background refresh and launch checks serialized so an in-progress session or refresh can finish before rule maintenance.
+Installed files live in `%ProgramFiles%\Claude Guard Native\2.0.0` with administrator-only write ACLs.
 
-## Verification status
+## Build and verification
 
-The GUI and console compile as Windows x64 .NET Framework applications. The offline suite covers missing and changed rules, preventing an incompatible launch, rule loss during a session, incomplete setup, background refresh with the saved adapter, CLI arguments and exit codes, and time-zone rollback. It also covers replacing a saved policy, identifying Wintun under a custom interface name, and distinguishing the signed Store service from a desktop session. The build is unsigned.
+On Windows x64 with Windows PowerShell 5.1 or PowerShell 7:
 
-## Build and sources
+```powershell
+.\native\Build-NativeGuard.ps1
+.\native\Test-NetworkAdapters.ps1
+.\native\Test-FirewallPolicy.ps1
+.\native\Test-NativeGuard.ps1
+.\native\Test-ExitAndMonitor.ps1
+```
 
-On Windows x64, open PowerShell 7 or 64-bit Windows PowerShell 5.1 in the source folder. The source archive contains every project input. The build uses the .NET Framework compiler and PowerShell assembly included with Windows.
+For live host read-only diagnostics and the manual live-acceptance checklist:
 
-~~~powershell
-./native/Build-NativeGuard.ps1
-./native/Test-NativeGuard.ps1
-./native/Test-NetworkAdapters.ps1
-./native/Test-FirewallPolicy.ps1
-~~~
+```powershell
+.\native\Verify-LiveGuard.ps1
+.\native\Verify-LiveGuard.ps1 -CheckExit -ReportPath .\live-check.txt
+```
 
-The build writes both executables and their checksums to `native/.build/`. The project source is available under [GPL-3.0](../LICENSE). [Third-party notices](../NOTICE.md) document the older releases.
+The built executables are unsigned. Source is licensed under [GPL-3.0](../LICENSE).

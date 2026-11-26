@@ -248,7 +248,7 @@ public static class ClaudeGuardWindowsProxy
         return value != IntPtr.Zero && !String.IsNullOrWhiteSpace(Marshal.PtrToStringUni(value));
     }
 
-    public static bool Configured()
+    public static string Describe()
     {
         UserSettings user;
         bool userFound = WinHttpGetIEProxyConfigForCurrentUser(out user);
@@ -258,8 +258,15 @@ public static class ClaudeGuardWindowsProxy
             const int FileNotFound = 2;
             if (!userFound && userError != FileNotFound)
                 throw new Win32Exception(userError, "Windows could not read the current user's proxy settings.");
-            if (userFound && (user.AutoDetect || HasText(user.AutoConfigUrl) || HasText(user.Proxy)))
-                return true;
+            if (userFound)
+            {
+                if (HasText(user.Proxy))
+                    return "ManualProxy";
+                if (HasText(user.AutoConfigUrl))
+                    return "AutoConfig";
+                if (user.AutoDetect)
+                    return "AutoDetect";
+            }
         }
         finally
         {
@@ -276,7 +283,9 @@ public static class ClaudeGuardWindowsProxy
             if (!machineFound)
                 throw new Win32Exception(machineError, "Windows could not read the default WinHTTP proxy.");
             const uint NoProxy = 1;
-            return machine.AccessType != NoProxy || HasText(machine.Proxy);
+            if (machine.AccessType != NoProxy || HasText(machine.Proxy))
+                return "WinHttp";
+            return "None";
         }
         finally
         {
@@ -284,19 +293,61 @@ public static class ClaudeGuardWindowsProxy
             if (machine.Bypass != IntPtr.Zero) GlobalFree(machine.Bypass);
         }
     }
+
+    public static bool Configured()
+    {
+        return Describe() != "None";
+    }
 }
 '@ -ErrorAction Stop
     }
     [ClaudeGuardWindowsProxy]::Configured()
 }
 
-function Assert-GuardNoProxy {
+function Get-GuardProxyDetail {
     foreach ($name in @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'GLOBAL_AGENT_HTTP_PROXY')) {
         if (-not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
-            throw 'A process proxy is configured. The guard requires direct routing through the VPN adapter.'
+            return [pscustomobject]@{
+                Kind = 'EnvVar'
+                Source = $name
+                Message = "Process proxy environment variable '$name' is configured. Clear it so Claude routes directly through the VPN adapter."
+            }
         }
     }
-    if (Test-GuardSystemProxy) {
-        throw 'A Windows proxy or automatic proxy discovery is configured. The guard requires direct routing through the VPN adapter.'
+    $configured = Test-GuardSystemProxy
+    if (-not $configured) {
+        return [pscustomobject]@{ Kind = 'None'; Source = ''; Message = '' }
+    }
+    $kind = 'SystemProxy'
+    if ('ClaudeGuardWindowsProxy' -as [type]) {
+        $described = [ClaudeGuardWindowsProxy]::Describe()
+        if ($described -and $described -ne 'None') { $kind = $described }
+    }
+    $message = switch ($kind) {
+        'ManualProxy' {
+            'Windows manual proxy is enabled (Settings -> Network & internet -> Proxy). Turn it off so Claude routes directly through the VPN adapter.'
+        }
+        'AutoConfig' {
+            'A Windows proxy auto-configuration script (PAC) is enabled (Settings -> Network & internet -> Proxy). Turn it off so Claude routes directly through the VPN adapter.'
+        }
+        'AutoDetect' {
+            'Windows automatic proxy discovery (WPAD / "Automatically detect settings") is enabled. Turn it off in Windows Settings -> Network & internet -> Proxy so Claude routes directly through the VPN adapter.'
+        }
+        'WinHttp' {
+            'A machine-wide WinHTTP proxy is configured (check "netsh winhttp show proxy"). Clear it so Claude routes directly through the VPN adapter.'
+        }
+        default {
+            'A Windows proxy or automatic proxy discovery is configured. The guard requires direct routing through the VPN adapter.'
+        }
+    }
+    [pscustomobject]@{ Kind = $kind; Source = $kind; Message = $message }
+}
+
+function Assert-GuardNoProxy {
+    $detail = Get-GuardProxyDetail
+    if ($detail.Kind -ne 'None') {
+        $error = [InvalidOperationException]::new($detail.Message)
+        $error.Data['ProxyIssue'] = $detail.Kind
+        throw $error
     }
 }

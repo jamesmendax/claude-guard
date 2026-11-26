@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Claude Guard Option A: Aperture Gate (256px Mathematical Grid) -->
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="#15171C"/>
+  <rect x="11" y="11" width="234" height="234" rx="51" fill="none" stroke="#2F3440" stroke-width="4"/>
+  <!-- Pure Geometric C-Aperture Arc -->
+  <path d="M 172 82 A 60 60 0 1 0 172 174" fill="none" stroke="#F5F6F8" stroke-width="25" stroke-linecap="round"/>
+  <!-- Emerald Gatekeeper Signal LED -->
+  <circle cx="176" cy="128" r="20" fill="#10B981"/>
+</svg>

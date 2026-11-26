@@ -130,10 +130,17 @@ foreach ($name in $proxyVariables) { $oldProxy[$name] = [Environment]::GetEnviro
 try {
     foreach ($name in $proxyVariables) { [Environment]::SetEnvironmentVariable($name, $null) }
     $script:ProxyPresent = $true
-    Assert-NetworkFailure { Assert-GuardNoProxy } 'Windows proxy or automatic proxy discovery is configured'
+    Assert-NetworkFailure { Assert-GuardNoProxy } 'Windows'
+    $proxyDetail = Get-GuardProxyDetail
+    Assert-NetworkCase ($proxyDetail.Kind -ne 'None') 'Get-GuardProxyDetail reports a non-None proxy kind when system proxy is active.'
     $script:ProxyPresent = $false
     [Environment]::SetEnvironmentVariable('HTTPS_PROXY', 'http://127.0.0.1:81')
-    Assert-NetworkFailure { Assert-GuardNoProxy } 'process proxy is configured'
+    Assert-NetworkFailure { Assert-GuardNoProxy } 'HTTPS_PROXY'
+    $envDetail = Get-GuardProxyDetail
+    Assert-NetworkCase ($envDetail.Kind -ceq 'EnvVar' -and $envDetail.Source -ceq 'HTTPS_PROXY') 'Get-GuardProxyDetail identifies the exact proxy environment variable.'
+    $caughtIssue = ''
+    try { Assert-GuardNoProxy } catch { $caughtIssue = [string]$_.Exception.Data['ProxyIssue'] }
+    Assert-NetworkCase ($caughtIssue -ceq 'EnvVar') 'Assert-GuardNoProxy attaches ProxyIssue metadata to the thrown exception.'
 }
 finally {
     foreach ($name in $proxyVariables) { [Environment]::SetEnvironmentVariable($name, $oldProxy[$name]) }

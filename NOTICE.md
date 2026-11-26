@@ -2,7 +2,7 @@
 
 The GPL-3.0 license at the repository root applies to the original Claude Guard components. Third-party material retains its applicable terms.
 
-Native Guard 1.0.11 uses project-owned routing, application inventory, and firewall code with the Windows inbox APIs. Its build uses the files in the Native Guard source folder and the Windows .NET Framework compiler. The table below records dependencies of earlier local builds and historical design references.
+Native Guard 1.0.11+ (including 2.0.0) uses project-owned routing, application inventory, and firewall code with the Windows inbox APIs. Its build uses the files in the Native Guard source folder and the Windows .NET Framework compiler. The table below records dependencies of earlier local builds and historical design references.
 
 | Component | Terms and provenance |
 | --- | --- |

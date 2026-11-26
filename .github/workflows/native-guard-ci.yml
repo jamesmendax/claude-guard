@@ -1,0 +1,57 @@
+name: Native Guard CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Native Guard (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\native\Build-NativeGuard.ps1
+
+      - name: Verify packaged executables and checksums
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $console = Get-ChildItem -Path .\native\.build -Filter 'ClaudeGuardNativeConsole-*-x64.exe' | Select-Object -First 1
+          if (-not $console) { throw 'Built console executable not found.' }
+          & $console.FullName --verify-package
+          if ($LASTEXITCODE -ne 0) { throw "Package verification failed with exit code $LASTEXITCODE." }
+
+      - name: Run offline test suites (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\native\Test-NetworkAdapters.ps1
+          .\native\Test-FirewallPolicy.ps1
+          .\native\Test-NativeGuard.ps1
+          .\native\Test-ExitAndMonitor.ps1
+
+      - name: Run offline test suites (PowerShell 7)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\native\Test-NetworkAdapters.ps1
+          .\native\Test-FirewallPolicy.ps1
+          .\native\Test-NativeGuard.ps1
+          .\native\Test-ExitAndMonitor.ps1
+
+      - name: Upload Native Guard build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-guard-native-x64
+          path: |
+            native/.build/ClaudeGuardNative-*-x64.exe
+            native/.build/ClaudeGuardNativeConsole-*-x64.exe
+            native/.build/SHA256SUMS.txt
+          if-no-files-found: error

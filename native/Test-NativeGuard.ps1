@@ -42,13 +42,20 @@ function Reset-Fixture {
     $script:SleepCount = 0
     $script:WriteCount = 0
     $script:CreateCount = 0
+    $script:InventoryCalls = 0
+    $script:ExitChecks = 0
     $script:FailSecondCreate = $false
     $script:FailDuringSession = $false
+    $script:FailExitDuringSession = $false
     $script:ProxyPresent = $false
+    $script:ProxyIssueKind = 'AutoDetect'
     $script:DesktopPresent = $true
     $script:RefreshChecked = $false
     $script:NewProgram = $null
     $script:ObservedArgs = $null
+    $script:MockExitPolicy = $null
+    $script:MockExitResult = $null
+    $script:SimulateEventWake = $false
     $script:RemovedRules = [Collections.Generic.List[string]]::new()
 }
 
@@ -79,20 +86,44 @@ function Get-Content {
 }
 
 function Assert-GuardNoProxy {
-    if ($script:ProxyPresent) { throw 'Fixture proxy configured.' }
+    if ($script:ProxyPresent) {
+        $err = [InvalidOperationException]::new('Fixture proxy configured.')
+        $err.Data['ProxyIssue'] = $script:ProxyIssueKind
+        throw $err
+    }
 }
 function Assert-GuardAdministratorDirectory([string]$Path) {}
 function Assert-GuardProfiles {}
+function Get-GuardRefreshTaskState { 'Not installed' }
+function Test-GuardDesktopAutoStart { $false }
+function Get-GuardExitPolicy { $script:MockExitPolicy }
+function Get-GuardAdapterIpv4($Vpn) { $null }
+function Invoke-GuardExitCheck($Policy, [bool]$AllowRetry, [string]$LocalIpv4) {
+    if (-not $Policy -or -not $Policy.Enabled) { return $null }
+    $script:ExitChecks++
+    if ($script:FailExitDuringSession -and $script:ExitChecks -ge 2) {
+        return [pscustomobject]@{
+            Ok = $true; PolicyAllowed = $false; Ip = '203.0.113.99'; MaskedIp = '203.0.*.*'
+            Country = 'CN'; Colo = 'PVG'; Message = 'Blocked: observed country drifted.'
+        }
+    }
+    $script:MockExitResult
+}
+function New-GuardNetworkWatcher { $null }
+function Wait-GuardMonitorTick($Watcher, [int]$Milliseconds) {
+    Start-Sleep -Milliseconds $Milliseconds
+    return $script:SimulateEventWake
+}
 
 function Get-GuardVpnAdapter([string]$Pin) {
     if ($Pin -and $Pin -ne $script:Pin) { throw 'Unexpected fixture VPN pin.' }
-    [pscustomobject]@{ InterfaceGuid = $script:Pin }
+    [pscustomobject]@{ InterfaceGuid = $script:Pin; Name = 'Fixture Wintun VPN'; ifIndex = 9 }
 }
 
 function Get-GuardPinnedVpnAdapter([string]$Pin) {
     if ($Pin -ne $script:Pin) { throw 'Unexpected fixture VPN pin during refresh.' }
     $script:RefreshChecked = $true
-    [pscustomobject]@{ InterfaceGuid = $script:Pin }
+    [pscustomobject]@{ InterfaceGuid = $script:Pin; Name = 'Fixture Wintun VPN'; ifIndex = 9 }
 }
 
 function Get-GuardBlockedAdapters($Vpn, [switch]$AllowVpnDown) {
@@ -100,6 +131,7 @@ function Get-GuardBlockedAdapters($Vpn, [switch]$AllowVpnDown) {
 }
 
 function Get-GuardInventory {
+    $script:InventoryCalls++
     [pscustomobject]@{
         DesktopPaths = if ($script:DesktopPresent) { @($script:FixtureExe) } else { @() }
         Packages = @()
@@ -178,10 +210,20 @@ function Stop-GuardRunningProcesses($Inventory, $StartedProcess, $StartedIdentit
 function Start-Sleep {
     param([int]$Milliseconds)
     $script:SleepCount++
-    if (-not $script:FailDuringSession -or $script:SleepCount -gt 1) {
-        throw 'Fixture monitor did not stop on the missing rule.'
+    if ($script:FailDuringSession) {
+        if ($script:SleepCount -gt 1) {
+            throw 'Fixture monitor did not stop on the missing rule.'
+        }
+        $script:Rules.Remove($script:OldRule)
+        return
     }
-    $script:Rules.Remove($script:OldRule)
+    if ($script:FailExitDuringSession) {
+        if ($script:SleepCount -gt 2) {
+            throw 'Fixture monitor did not stop on exit drift.'
+        }
+        return
+    }
+    throw 'Fixture monitor did not stop as expected.'
 }
 
 function New-NetFirewallRule {
@@ -428,6 +470,78 @@ try {
         $script:GuardFolder = $priorFolder
         $script:GuardState = $priorFile
     }
+}
+
+# --- New 2.0.0 telemetry, proxy issue, exit policy, and event-driven monitor tests ---
+Reset-Fixture
+$status = Get-GuardNativeStatus
+Assert-Check (
+    $status.VpnName -ceq 'Fixture Wintun VPN' -and $status.BlockedAdapterCount -eq 1 -and
+    $status.ProtectedTargetCount -eq 1 -and $status.DesktopReady -and $status.CliReady -and
+    $status.ExitStatus -ceq 'Disabled' -and $status.ProxyIssue -ceq 'None'
+) 'Status populates VPN name, target/adapter counts, Desktop/CLI flags, and disabled exit state.'
+
+Reset-Fixture
+$script:ProxyPresent = $true
+$script:ProxyIssueKind = 'AutoDetect'
+$status = Get-GuardNativeStatus
+Assert-Check (-not $status.Ready -and $status.ProxyIssue -ceq 'AutoDetect') 'Status surfaces exact ProxyIssue classification for UI recovery.'
+
+Reset-Fixture
+$script:MockExitPolicy = [pscustomobject]@{ Enabled = $true; MonitorIntervalSeconds = 45 }
+$script:MockExitResult = [pscustomobject]@{
+    Ok = $true; PolicyAllowed = $false; Ip = '203.0.113.99'; MaskedIp = '203.0.*.*'
+    Country = 'CN'; Colo = 'PVG'; Message = 'Blocked: country outside allowlist.'
+}
+$status = Get-GuardNativeStatus
+Assert-Check (
+    -not $status.Ready -and $status.ExitStatus -ceq 'Policy mismatch' -and
+    $status.ExitMaskedIp -ceq '203.0.*.*' -and $status.ExitCountry -ceq 'CN'
+) 'Enabled exit policy mismatch blocks launch readiness and reports masked IPv4.'
+Assert-Throws { Invoke-GuardNativeDesktop } 'country outside allowlist'
+Assert-Check (-not $script:Started) 'Launch refuses to start Claude when pre-launch exit policy fails.'
+
+Reset-Fixture
+$script:MockExitPolicy = [pscustomobject]@{ Enabled = $true; MonitorIntervalSeconds = 45 }
+$script:MockExitResult = [pscustomobject]@{
+    Ok = $true; PolicyAllowed = $true; Ip = '203.0.113.42'; MaskedIp = '203.0.*.*'
+    Country = 'JP'; Colo = 'NRT'; Message = 'Exit verified: 203.0.*.* (JP/NRT)'
+}
+$status = Get-GuardNativeStatus
+Assert-Check ($status.Ready -and $status.ExitStatus -ceq 'Verified' -and $status.ExitCountry -ceq 'JP') 'Enabled exit policy match allows launch readiness.'
+
+Reset-Fixture
+$script:MockExitPolicy = [pscustomobject]@{ Enabled = $true; MonitorIntervalSeconds = 300 }
+$script:MockExitResult = [pscustomobject]@{
+    Ok = $true; PolicyAllowed = $true; Ip = '203.0.113.42'; MaskedIp = '203.0.*.*'
+    Country = 'JP'; Colo = 'NRT'; Message = 'Exit verified'
+}
+$script:FailExitDuringSession = $true
+$script:SimulateEventWake = $true
+Assert-Throws { Invoke-GuardNativeDesktop } 'Exit verification failed during this session'
+Assert-Check ($script:Started -and $script:StopRequested -and $script:ExitChecks -eq 2) 'Route/interface event wakeup triggers immediate in-session exit recheck and stops Claude on drift.'
+
+Reset-Fixture
+$script:FailDuringSession = $true
+$script:SimulateEventWake = $false
+Assert-Throws { Invoke-GuardNativeDesktop } 'effective rule missing'
+Assert-Check ($script:InventoryCalls -eq 2) 'Tiered session monitoring caches inventory across quiet ticks while still catching rule loss immediately.'
+
+Reset-Fixture
+$script:Started = $true
+& {
+    function Get-Process {
+        param([int]$Id)
+        $p = [pscustomobject]@{ Id = $Id; HasExited = $false }
+        Add-Member -InputObject $p -MemberType ScriptMethod -Name Dispose -Value {}
+        $p
+    }
+    function Stop-GuardRunningProcesses($Inventory, $StartedProcess, $StartedIdentity) {
+        $script:StopRequested = $true
+        $script:Started = $false
+    }
+    $stoppedRes = Stop-GuardClaudeSessions
+    Assert-Check ($stoppedRes.Ok -and $script:StopRequested -and $stoppedRes.Message -like '*Stopped 1 Claude process tree*') 'Stop-GuardClaudeSessions terminates discovered Claude client process trees safely.'
 }
 
 Write-Output "$script:Passed offline Native Guard checks passed."
