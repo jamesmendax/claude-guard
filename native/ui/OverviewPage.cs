@@ -499,10 +499,10 @@ namespace ClaudeGuardNative
             configureBtn.IsEnabled = idle && r != null && r.CanConfigure;
             configureBtn.SetResourceReference(StyleProperty,
                 (r != null && r.CanConfigure && !r.Ready) ? "SecondaryButtonStyle" : "GhostButtonStyle");
-            openDesktopBtn.IsEnabled = idle && r != null && r.Ready;
+            openDesktopBtn.IsEnabled = idle && r != null && (r.Ready || r.CanRepair);
 
             bool cliLaunchable = idle && r != null && r.CliReady &&
-                String.Equals(r.Firewall, "Effective blocks verified", StringComparison.OrdinalIgnoreCase) &&
+                (r.CanRepair || String.Equals(r.Firewall, "Effective blocks verified", StringComparison.OrdinalIgnoreCase)) &&
                 String.Equals(r.Route, "VPN route verified", StringComparison.OrdinalIgnoreCase) &&
                 !String.Equals(r.ExitStatus, "Policy mismatch", StringComparison.OrdinalIgnoreCase) &&
                 !String.Equals(r.ExitStatus, "Probe failed", StringComparison.OrdinalIgnoreCase) &&
@@ -591,6 +591,14 @@ namespace ClaudeGuardNative
                         "请先开启 Bettbox 等全隧道 TUN 虚拟网卡，再点击「重新检查」");
                     SetChip(NodeTone.Danger, UiStrings.T("Blocked", "已阻止放行"));
                 }
+                else if (r.CanRepair)
+                {
+                    headline.Text = UiStrings.T("Firewall coverage needs repair", "防火墙规则需要修复");
+                    subtitle.Text = UiStrings.T(
+                        "Start a guarded launch to repair the rules for the saved VPN. Windows will ask for administrator permission.",
+                        "点击启动，Windows 会请求管理员权限，修复已保存 VPN 的防火墙规则后再核验并启动。");
+                    SetChip(NodeTone.Warn, UiStrings.T("Repair needed", "待修复防火墙"));
+                }
                 else if (fwNeedSetup || r.CanConfigure)
                 {
                     headline.Text = UiStrings.T("Firewall lock setup required", "待配置 Windows 防火墙出站锁定");
@@ -661,7 +669,7 @@ namespace ClaudeGuardNative
             {
                 n1Tone = NodeTone.Warn;
                 n1Title = UiStrings.T("Firewall lock", "防火墙待配置");
-                n1Sub = UiStrings.T("Setup required", "需应用出站规则");
+                n1Sub = r.CanRepair ? UiStrings.T("Repair required", "需修复出站规则") : UiStrings.T("Setup required", "需应用出站规则");
                 r01 = RailKind.Warn;
             }
             else if (!desktopFound && String.Equals(r.Firewall, "Unverified", StringComparison.OrdinalIgnoreCase))
@@ -741,7 +749,7 @@ namespace ClaudeGuardNative
                     UiStrings.T("Open proxy settings", "打开系统代理设置"),
                     delegate { if (OpenProxySettingsRequested != null) OpenProxySettingsRequested(); });
             }
-            else if (fwNeedSetup || (r.CanConfigure && !fwOk))
+            else if (!r.CanRepair && (fwNeedSetup || (r.CanConfigure && !fwOk)))
             {
                 ShowAlert(
                     false,

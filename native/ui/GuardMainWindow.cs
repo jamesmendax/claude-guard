@@ -61,7 +61,6 @@ namespace ClaudeGuardNative
         private System.Drawing.Icon trayIconOk;
         private System.Drawing.Icon trayIconWarn;
         private System.Drawing.Icon trayIconBlocked;
-        private bool forceExit;
         private bool suppressLangEvents;
         private string activeMode;
         private string sessionZone;
@@ -150,7 +149,7 @@ namespace ClaudeGuardNative
             trayOpenCliItem.Click += delegate { LaunchGuardedCliTerminal(); };
             trayStopClaudeItem.Click += delegate { ConfirmStopClaude(); };
             trayHygieneItem.Click += delegate { RestoreWindow(); SelectTab(2); };
-            trayExitItem.Click += delegate { forceExit = true; Close(); };
+            trayExitItem.Click += delegate { Close(); };
 
             trayMenu.Items.AddRange(new Forms.ToolStripItem[]
             {
@@ -590,7 +589,7 @@ namespace ClaudeGuardNative
             if (finishedMode == "Status" && pendingAutoLaunch)
             {
                 pendingAutoLaunch = false;
-                if (result != null && result.Ready)
+                if (result != null && (result.Ready || result.CanRepair))
                     StartGuardedDesktopLaunch();
             }
         }
@@ -633,9 +632,9 @@ namespace ClaudeGuardNative
             // Tray menu item enablement
             bool idle = activeMode == null;
             trayCheckItem.Enabled = idle;
-            trayOpenDesktopItem.Enabled = idle && lastResult != null && lastResult.Ready;
+            trayOpenDesktopItem.Enabled = idle && lastResult != null && (lastResult.Ready || lastResult.CanRepair);
             trayOpenCliItem.Enabled = idle && lastResult != null && lastResult.CliReady &&
-                String.Equals(lastResult.Firewall, "Effective blocks verified", StringComparison.OrdinalIgnoreCase) &&
+                (lastResult.CanRepair || String.Equals(lastResult.Firewall, "Effective blocks verified", StringComparison.OrdinalIgnoreCase)) &&
                 String.Equals(lastResult.Route, "VPN route verified", StringComparison.OrdinalIgnoreCase) &&
                 !String.Equals(lastResult.ExitStatus, "Policy mismatch", StringComparison.OrdinalIgnoreCase) &&
                 !String.Equals(lastResult.ExitStatus, "Probe failed", StringComparison.OrdinalIgnoreCase) &&
@@ -905,7 +904,7 @@ namespace ClaudeGuardNative
 
         private void OnWindowClosing(object sender, CancelEventArgs e)
         {
-            if (!forceExit && activeMode == "Launch")
+            if (activeMode == "Launch")
             {
                 e.Cancel = true;
                 Hide();

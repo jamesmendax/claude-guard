@@ -24,6 +24,7 @@ namespace ClaudeGuardNative
         public bool Ok;
         public bool Ready;
         public bool CanConfigure;
+        public bool CanRepair;
         public string Route;
         public string Firewall;
         public string Claude;
@@ -134,6 +135,11 @@ namespace ClaudeGuardNative
         internal static GuardResult Run(string mode, string timeZone, string[] cliArguments)
         {
             GuardResult result = RunWindowsChecks(mode, timeZone, cliArguments);
+            if (result.CanRepair && (mode == "Launch" || mode == "LaunchCli"))
+            {
+                GuardResult repair = RequestConfiguration(repair: true);
+                result = repair.Ok ? RunWindowsChecks(mode, timeZone, cliArguments) : repair;
+            }
             GuardDiagnostics.Record(mode, result);
             return result;
         }
@@ -148,7 +154,7 @@ namespace ClaudeGuardNative
                 bool maintenance = mode == "Refresh" || mode == "RemoveRules";
                 if (launching && IsElevated())
                     return GuardResult.Failure("Open the guard normally before starting Claude.");
-                if ((mode == "Configure" || maintenance) && !IsElevated())
+                if ((mode == "Configure" || mode == "Repair" || maintenance) && !IsElevated())
                     return GuardResult.Failure("Firewall setup requires administrator approval.");
                 if (mode == "Refresh" && !IsInstalledConsole())
                     return GuardResult.Failure("Run background refresh through the installed Native Guard " + VersionText + " console.");
@@ -193,6 +199,7 @@ namespace ClaudeGuardNative
                             Ok = ReadProperty<bool>(result, "Ok"),
                             Ready = ReadProperty<bool>(result, "Ready"),
                             CanConfigure = ReadProperty<bool>(result, "CanConfigure"),
+                            CanRepair = ReadProperty<bool>(result, "CanRepair"),
                             Route = ReadProperty<string>(result, "Route"),
                             Firewall = ReadProperty<string>(result, "Firewall"),
                             Claude = ReadProperty<string>(result, "Claude"),
@@ -318,16 +325,18 @@ namespace ClaudeGuardNative
             }
         }
 
-        internal static GuardResult RequestConfiguration(string statusMode = "Status")
+        internal static GuardResult RequestConfiguration(string statusMode = "Status", bool repair = false)
         {
+            string operation = repair ? "repair" : "setup";
             try
             {
                 if (IsElevated())
-                    return Run("Configure");
+                    return Run(repair ? "Repair" : "Configure");
                 string sid;
                 using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
                     sid = identity.User.Value;
-                var start = new ProcessStartInfo(Application.ExecutablePath, "--configure-admin " + sid)
+                string command = repair ? "--repair-admin " : "--configure-admin ";
+                var start = new ProcessStartInfo(Application.ExecutablePath, command + sid)
                 {
                     UseShellExecute = true,
                     Verb = "runas",
@@ -336,17 +345,17 @@ namespace ClaudeGuardNative
                 using (Process worker = Process.Start(start))
                 {
                     if (worker == null)
-                        return GuardResult.Failure("Windows did not start firewall setup.");
+                        return GuardResult.Failure("Windows did not start firewall " + operation + ".");
                     worker.WaitForExit();
                     if (worker.ExitCode != 0)
-                        return GuardResult.Failure("Firewall setup did not complete. Check local protection again.");
+                        return GuardResult.Failure("Firewall " + operation + " did not complete. Check local protection again.");
                 }
-                return Run(statusMode);
+                return repair ? new GuardResult { Ok = true } : Run(statusMode);
             }
             catch (System.ComponentModel.Win32Exception error)
             {
                 return GuardResult.Failure(error.NativeErrorCode == 1223
-                    ? "Firewall setup was cancelled." : error.Message);
+                    ? "Firewall " + operation + " was cancelled." : error.Message);
             }
             catch (Exception error)
             {
@@ -373,23 +382,25 @@ namespace ClaudeGuardNative
                 catch (IOException) { return 2; }
                 catch (UnauthorizedAccessException) { return 2; }
             }
-            if (args.Length == 2 && args[0] == "--configure-admin")
+            if (args.Length == 2 && (args[0] == "--configure-admin" || args[0] == "--repair-admin"))
             {
+                bool repair = args[0] == "--repair-admin";
                 using (WindowsIdentity identity = WindowsIdentity.GetCurrent())
                 {
                     if (!GuardEngine.IsElevated() || identity.User.Value != args[1])
                     {
-                        MessageBox.Show("Approve setup using the same Windows account that runs Claude.",
+                        MessageBox.Show("Approve this firewall change using the same Windows account that runs Claude.",
                             "Claude Guard Native", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         return 1;
                     }
                 }
-                GuardResult result = GuardEngine.Run("Configure");
+                GuardResult result = GuardEngine.Run(repair ? "Repair" : "Configure");
 #if GUARD_CONSOLE
                 Console.Error.WriteLine(result.Message);
 #else
-                MessageBox.Show(result.Message, "Claude Guard Native", MessageBoxButtons.OK,
-                    result.Ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                if (!repair || !result.Ok)
+                    MessageBox.Show(result.Message, "Claude Guard Native", MessageBoxButtons.OK,
+                        result.Ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
 #endif
                 return result.Ok ? 0 : 1;
             }

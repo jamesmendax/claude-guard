@@ -16,6 +16,7 @@ foreach ($definition in $ast.FindAll({
 }
 
 $script:GuardRulePrefix = 'ClaudeGuardNative-Block'
+$script:GuardFirewallMutexName = 'Local\ClaudeGuardNativeFixture-' + [guid]::NewGuid().ToString('N')
 $script:ProgramDataRoot = 'C:\NativeGuardFixture'
 $script:GuardFolder = Join-Path $script:ProgramDataRoot 'ClaudeGuardNative'
 $script:GuardState = Join-Path $script:GuardFolder 'firewall.json'
@@ -49,6 +50,8 @@ function Reset-Fixture {
     $script:FailExitDuringSession = $false
     $script:ProxyPresent = $false
     $script:ProxyIssueKind = 'AutoDetect'
+    $script:ProfilesBlocked = $false
+    $script:VpnChanged = $false
     $script:DesktopPresent = $true
     $script:RefreshChecked = $false
     $script:NewProgram = $null
@@ -93,7 +96,9 @@ function Assert-GuardNoProxy {
     }
 }
 function Assert-GuardAdministratorDirectory([string]$Path) {}
-function Assert-GuardProfiles {}
+function Assert-GuardProfiles {
+    if ($script:ProfilesBlocked) { throw 'Windows Firewall profiles are unavailable.' }
+}
 function Get-GuardRefreshTaskState { 'Not installed' }
 function Test-GuardDesktopAutoStart { $false }
 function Get-GuardExitPolicy { $script:MockExitPolicy }
@@ -117,6 +122,7 @@ function Wait-GuardMonitorTick($Watcher, [int]$Milliseconds) {
 
 function Get-GuardVpnAdapter([string]$Pin) {
     if ($Pin -and $Pin -ne $script:Pin) { throw 'Unexpected fixture VPN pin.' }
+    if ($Pin -and $script:VpnChanged) { throw 'The saved VPN is no longer active.' }
     [pscustomobject]@{ InterfaceGuid = $script:Pin; Name = 'Fixture Wintun VPN'; ifIndex = 9 }
 }
 
@@ -286,7 +292,10 @@ Assert-Check (-not $status.Ready -and $status.CanConfigure) 'Missing state requi
 Reset-Fixture
 $script:Rules.Remove($script:OldRule)
 $status = Get-GuardNativeStatus
-Assert-Check (-not $status.Ready -and $status.Message -like '*effective rule missing*') 'Missing effective rules disable launch.'
+Assert-Check (
+    -not $status.Ready -and $status.CanRepair -and $status.Firewall -eq 'Repair required' -and
+    $status.Message -like '*effective rule missing*'
+) 'Missing effective rules require repair before launch.'
 
 Reset-Fixture
 $script:Rules[$script:OldRule] = 'Outbound Allow'
@@ -315,8 +324,22 @@ Assert-Check (-not $status.Ready -and $status.Message -like '*Daily Guard*') 'Ex
 
 Reset-Fixture
 $script:Rules.Remove($script:OldRule)
-Assert-Throws { Invoke-GuardNativeDesktop } 'effective rule missing'
-Assert-Check (-not $script:Started -and -not $script:StopRequested) 'Launch refuses unverified coverage before creating a process.'
+$blocked = Invoke-GuardNativeDesktop
+Assert-Check (
+    -not $blocked.Ok -and $blocked.CanRepair -and -not $script:Started -and -not $script:StopRequested
+) 'Launch requests repair before creating a process with unverified coverage.'
+
+Reset-Fixture
+$script:ProfilesBlocked = $true
+Assert-Throws { Invoke-GuardNativeDesktop } 'Firewall profiles are unavailable'
+Assert-Check (-not $script:Started) 'A disabled firewall profile stops launch without requesting repair.'
+
+Reset-Fixture
+$script:FixtureState.OwnerSid = ''
+$script:Rules.Remove($script:OldRule)
+$status = Get-GuardNativeStatus
+Assert-Check (-not $status.Ready -and -not $status.CanRepair) 'Rules without a saved owner require explicit setup.'
+Assert-Throws { Set-GuardNativeProtection -Repair } 'record the Windows account'
 
 Reset-Fixture
 $script:FailDuringSession = $true
@@ -347,6 +370,32 @@ Reset-Fixture
 $script:ProxyPresent = $true
 $status = Get-GuardNativeStatus
 Assert-Check (-not $status.Ready -and $status.Message -like '*proxy configured*') 'A configured proxy blocks launch readiness.'
+
+Reset-Fixture
+$script:NewProgram = 'C:\NativeGuardFixture\Updated\Claude.exe'
+$blocked = Invoke-GuardNativeDesktop -Cli -Arguments @('--version')
+Assert-Check (
+    -not $blocked.Ok -and $blocked.CanRepair -and $null -eq $script:ObservedArgs
+) 'An updated program with no rule coverage is held before its first guarded launch.'
+$repaired = Set-GuardNativeProtection -Repair
+$script:MockExitPolicy = [pscustomobject]@{ Enabled = $true }
+$script:MockExitResult = [pscustomobject]@{ Ok = $true; PolicyAllowed = $false; Message = 'Blocked by the exit policy.' }
+Assert-Throws { Invoke-GuardNativeDesktop -Cli -Arguments @('--version') } 'Blocked by the exit policy'
+Assert-Check ($null -eq $script:ObservedArgs) 'A repaired firewall still requires the enabled exit policy to pass.'
+$script:MockExitPolicy = $null
+$launched = Invoke-GuardNativeDesktop -Cli -Arguments @('--version')
+Assert-Check (
+    $repaired.Ok -and $launched.Ok -and $script:ObservedArgs[0] -eq '--version' -and
+    $script:CreateCount -eq 1 -and $script:FixtureState.Rules -contains $script:OldRule -and
+    $script:FixtureState.VpnGuid -eq $script:Pin
+) 'Repair retains existing protection and verifies the added rule before launch.'
+
+Reset-Fixture
+$script:VpnChanged = $true
+Assert-Throws { Set-GuardNativeProtection -Repair } 'saved VPN is no longer active'
+Assert-Check (
+    $script:CreateCount -eq 0 -and $script:WriteCount -eq 0
+) 'Launch-time repair cannot silently switch to another VPN.'
 
 $core = Join-Path $PSScriptRoot '.build\NetworkCore.ps1'
 $coreErrors = $null

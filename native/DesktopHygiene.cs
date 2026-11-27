@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
@@ -52,6 +53,7 @@ namespace ClaudeGuardNative
         public int Version = 1;
         public string CreatedUtc = "";
         public QuarantineItem[] Items = new QuarantineItem[0];
+        public QuarantineItem PendingItem;
     }
 
     public sealed class QuarantineResult
@@ -63,8 +65,39 @@ namespace ClaudeGuardNative
         public string Message = "";
     }
 
+    public sealed class QuarantineInterruptedException : IOException
+    {
+        public readonly string BackupDirectory;
+
+        public QuarantineInterruptedException(string backupDirectory, Exception cause)
+            : base("Quarantine stopped. " + (String.IsNullOrEmpty(backupDirectory)
+                ? "No items were saved. " : "Saved items are available in the restore list. ") + cause.Message, cause)
+        {
+            BackupDirectory = backupDirectory;
+        }
+    }
+
+    public sealed class RestoreConflictException : IOException
+    {
+        public readonly string DestinationPath;
+        public readonly int RestoredCount;
+
+        public RestoreConflictException(string destinationPath, int restoredCount)
+            : base("Restore stopped because the destination already exists.\n" + destinationPath +
+                "\nRestored " + restoredCount + " item(s) in this attempt. The remaining items are still in the backup.")
+        {
+            DestinationPath = destinationPath;
+            RestoredCount = restoredCount;
+        }
+    }
+
     public static class DesktopHygiene
     {
+        private const int ErrorNotSameDevice = 17;
+        private const int ErrorFileExists = 80;
+        private const int ErrorAlreadyExists = 183;
+        private const string QuarantineMarker = ".quarantine-in-progress";
+
         private static readonly Encoding Utf8 = new UTF8Encoding(false);
         private static readonly string[] StorePackageFamilies = new[]
         {
@@ -206,56 +239,93 @@ namespace ClaudeGuardNative
             if ((rootInfo.Attributes & FileAttributes.ReparsePoint) != 0)
                 throw new IOException("The quarantine folder is not a regular directory.");
 
-            string stamp = "desktop-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) +
-                "-" + Guid.NewGuid().ToString("N").Substring(0, 8);
-            string backupDir = Path.Combine(root, stamp);
+            DateTime created = DateTime.UtcNow;
+            string stamp = "desktop-" + created.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) +
+                "-" + Guid.NewGuid().ToString("N");
+            string backupDir = Path.Combine(rootInfo.FullName, stamp);
+            string manifestPath = Path.Combine(backupDir, "manifest.json");
+            // Version 2 is an interrupted or in-progress backup. Older builds must not consume it.
+            var manifest = new QuarantineManifest
+            {
+                Version = 2,
+                CreatedUtc = created.ToString("O", CultureInfo.InvariantCulture)
+            };
             var movedItems = new List<QuarantineItem>();
             int preservedMcp = 0;
             long movedBytes = 0;
             int locIndex = 0;
+            FileStream marker = null;
 
-            foreach (DesktopDataLocation loc in report.Locations)
+            try
             {
-                locIndex++;
-                if (loc == null || !loc.Exists || String.IsNullOrWhiteSpace(loc.RootPath) || !Directory.Exists(loc.RootPath))
-                    continue;
-                if (IsReparsePoint(loc.RootPath))
-                    continue;
-                if (loc.HasMcpConfig)
-                    preservedMcp++;
-
-                string locTag = loc.Kind + "-" + locIndex.ToString(CultureInfo.InvariantCulture);
-                foreach (string relName in loc.CleanableItems)
+                foreach (DesktopDataLocation loc in report.Locations)
                 {
-                    if (String.IsNullOrWhiteSpace(relName) || ProtectedNames.Contains(relName) || !CleanableNames.Contains(relName))
+                    locIndex++;
+                    if (loc == null || !loc.Exists || String.IsNullOrWhiteSpace(loc.RootPath) || !Directory.Exists(loc.RootPath))
                         continue;
-
-                    string sourcePath = Path.Combine(loc.RootPath, relName);
-                    if (!File.Exists(sourcePath) && !Directory.Exists(sourcePath))
+                    if (IsReparsePoint(loc.RootPath))
                         continue;
-                    if (IsReparsePoint(sourcePath))
-                        continue;
+                    if (loc.HasMcpConfig)
+                        preservedMcp++;
 
-                    bool isDir = Directory.Exists(sourcePath);
-                    long itemBytes = isDir ? MeasureDirectoryBytes(sourcePath) : new FileInfo(sourcePath).Length;
-
-                    if (!Directory.Exists(backupDir))
-                        Directory.CreateDirectory(backupDir);
-                    string targetSub = Path.Combine(locTag, relName);
-                    string destPath = Path.Combine(backupDir, targetSub);
-                    string destParent = Path.GetDirectoryName(destPath);
-                    if (!Directory.Exists(destParent))
-                        Directory.CreateDirectory(destParent);
-
-                    MoveFileOrDirectory(sourcePath, destPath, isDir);
-                    movedItems.Add(new QuarantineItem
+                    string locTag = loc.Kind + "-" + locIndex.ToString(CultureInfo.InvariantCulture);
+                    foreach (string relName in loc.CleanableItems)
                     {
-                        OriginalPath = sourcePath,
-                        BackupRelativePath = targetSub,
-                        IsDirectory = isDir
-                    });
-                    movedBytes += itemBytes;
+                        if (String.IsNullOrWhiteSpace(relName) || ProtectedNames.Contains(relName) || !CleanableNames.Contains(relName))
+                            continue;
+
+                        string sourcePath = Path.Combine(loc.RootPath, relName);
+                        if (!File.Exists(sourcePath) && !Directory.Exists(sourcePath))
+                            continue;
+                        if (IsReparsePoint(sourcePath))
+                            continue;
+
+                        bool isDir = Directory.Exists(sourcePath);
+                        long itemBytes = isDir ? MeasureDirectoryBytes(sourcePath) : new FileInfo(sourcePath).Length;
+                        if (marker == null)
+                        {
+                            Directory.CreateDirectory(backupDir);
+                            marker = new FileStream(Path.Combine(backupDir, QuarantineMarker), FileMode.CreateNew,
+                                FileAccess.Write, FileShare.None, 4096, FileOptions.DeleteOnClose);
+                        }
+                        var item = new QuarantineItem
+                        {
+                            OriginalPath = sourcePath,
+                            BackupRelativePath = Path.Combine(locTag, relName),
+                            IsDirectory = isDir
+                        };
+                        string destination = ResolveBackupItemPath(backupDir, item.BackupRelativePath);
+                        Directory.CreateDirectory(Path.GetDirectoryName(destination));
+
+                        manifest.Items = movedItems.ToArray();
+                        manifest.PendingItem = item;
+                        WriteQuarantineManifest(manifestPath, manifest);
+                        MoveIntoQuarantine(sourcePath, destination, isDir);
+                        movedItems.Add(item);
+                        movedBytes += itemBytes;
+                        manifest.PendingItem = null;
+                    }
                 }
+
+                if (movedItems.Count != 0)
+                {
+                    manifest.Version = 1;
+                    manifest.Items = movedItems.ToArray();
+                    WriteQuarantineManifest(manifestPath, manifest);
+                }
+            }
+            catch (IOException error)
+            {
+                throw QuarantineFailure(backupDir, movedItems.Count, manifest.PendingItem, error);
+            }
+            catch (UnauthorizedAccessException error)
+            {
+                throw QuarantineFailure(backupDir, movedItems.Count, manifest.PendingItem, error);
+            }
+            finally
+            {
+                if (marker != null)
+                    marker.Dispose();
             }
 
             if (movedItems.Count == 0)
@@ -269,14 +339,6 @@ namespace ClaudeGuardNative
                     Message = "No cleanable Claude Desktop cache or session items were found."
                 };
             }
-
-            var manifest = new QuarantineManifest
-            {
-                Version = 1,
-                CreatedUtc = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture),
-                Items = movedItems.ToArray()
-            };
-            File.WriteAllText(Path.Combine(backupDir, "manifest.json"), new JavaScriptSerializer().Serialize(manifest), Utf8);
 
             return new QuarantineResult
             {
@@ -299,46 +361,83 @@ namespace ClaudeGuardNative
             string manifestPath = Path.Combine(backupDirectory, "manifest.json");
             if (!File.Exists(manifestPath) || IsReparsePoint(manifestPath))
                 throw new FileNotFoundException("Backup manifest.json is missing or invalid.");
+            if (IsQuarantineActive(backupDirectory))
+                throw new IOException("Quarantine is still running for this backup.");
 
-            string json = File.ReadAllText(manifestPath, Utf8);
-            QuarantineManifest manifest = new JavaScriptSerializer().Deserialize<QuarantineManifest>(json);
-            if (manifest == null || manifest.Version != 1 || manifest.Items == null)
+            QuarantineManifest manifest = ReadQuarantineManifest(manifestPath);
+            if (manifest == null || (manifest.Version != 1 && manifest.Version != 2) || manifest.Items == null)
                 throw new InvalidOperationException("Backup manifest is invalid.");
 
-            string fullBackupRoot = Path.GetFullPath(backupDirectory).TrimEnd('\\') + "\\";
-            int restored = 0;
+            var savedItems = new List<QuarantineItem>(manifest.Items);
+            if (manifest.Version == 2 && HasBackupPayload(backupDirectory, manifest.PendingItem))
+                savedItems.Add(manifest.PendingItem);
+            var pending = new List<QuarantineItem>();
 
-            foreach (QuarantineItem item in manifest.Items)
+            // Check all destinations before changing either the profile or the backup.
+            foreach (QuarantineItem item in savedItems)
             {
                 if (item == null || String.IsNullOrWhiteSpace(item.OriginalPath) || String.IsNullOrWhiteSpace(item.BackupRelativePath))
-                    continue;
+                    throw new InvalidOperationException("Backup manifest contains an invalid item.");
                 string leaf = Path.GetFileName(item.OriginalPath);
                 if (ProtectedNames.Contains(leaf) || !CleanableNames.Contains(leaf))
                     throw new InvalidOperationException("Refused to restore an unrecognized path from manifest: " + leaf);
 
-                string sourcePath = Path.GetFullPath(Path.Combine(backupDirectory, item.BackupRelativePath));
-                if (!sourcePath.StartsWith(fullBackupRoot, StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidOperationException("Manifest path escapes backup directory.");
-                if (IsReparsePoint(sourcePath))
+                string sourcePath = ResolveBackupItemPath(backupDirectory, item.BackupRelativePath);
+                FileAttributes? attributes = GetExistingAttributes(sourcePath);
+                FileAttributes? destinationAttributes = GetExistingAttributes(item.OriginalPath);
+                if (!attributes.HasValue)
+                {
+                    if (!destinationAttributes.HasValue)
+                        throw new IOException("A backup item is missing from both the backup and its expected destination: " + sourcePath);
+                    if ((destinationAttributes.Value & FileAttributes.ReparsePoint) != 0 ||
+                        ((destinationAttributes.Value & FileAttributes.Directory) != 0) != item.IsDirectory)
+                        throw new IOException("A backup item is missing and its destination has an unexpected type: " + item.OriginalPath);
                     continue;
+                }
+                if ((attributes.Value & FileAttributes.ReparsePoint) != 0 ||
+                    ((attributes.Value & FileAttributes.Directory) != 0) != item.IsDirectory)
+                    throw new IOException("A backup item has an unexpected type: " + sourcePath);
+                if (destinationAttributes.HasValue)
+                    throw new RestoreConflictException(item.OriginalPath, 0);
+                pending.Add(item);
+            }
 
-                bool exists = item.IsDirectory ? Directory.Exists(sourcePath) : File.Exists(sourcePath);
-                if (!exists)
-                    continue;
+            int restored = 0;
+            foreach (QuarantineItem item in pending)
+            {
+                string sourcePath = ResolveBackupItemPath(backupDirectory, item.BackupRelativePath);
+                try
+                {
+                    string destParent = Path.GetDirectoryName(item.OriginalPath);
+                    if (!String.IsNullOrEmpty(destParent) && !Directory.Exists(destParent))
+                        Directory.CreateDirectory(destParent);
+                    if (IsReparsePoint(destParent))
+                        throw new IOException("Target restore directory is not a regular directory.");
 
-                string destParent = Path.GetDirectoryName(item.OriginalPath);
-                if (!String.IsNullOrEmpty(destParent) && !Directory.Exists(destParent))
-                    Directory.CreateDirectory(destParent);
-                if (IsReparsePoint(destParent))
-                    throw new IOException("Target restore directory is not a regular directory.");
+                    bool moved = TryMoveIntoRestoreDestination(sourcePath, item.OriginalPath, restored);
+                    if (!moved)
+                        CopyIntoRestoreDestination(sourcePath, item, restored);
+                    restored++;
 
-                if (item.IsDirectory && Directory.Exists(item.OriginalPath))
-                    Directory.Delete(item.OriginalPath, true);
-                else if (!item.IsDirectory && File.Exists(item.OriginalPath))
-                    File.Delete(item.OriginalPath);
-
-                MoveFileOrDirectory(sourcePath, item.OriginalPath, item.IsDirectory);
-                restored++;
+                    if (!moved)
+                    {
+                        // Rename the copied backup item so a retry skips it. Keep its bytes until
+                        // the remaining items are restored and the entire backup can be removed.
+                        string consumedPath = Path.Combine(Path.GetDirectoryName(sourcePath), ".restored-" + Guid.NewGuid().ToString("N"));
+                        if (item.IsDirectory)
+                            Directory.Move(sourcePath, consumedPath);
+                        else
+                            File.Move(sourcePath, consumedPath);
+                    }
+                }
+                catch (RestoreConflictException) { throw; }
+                catch (Exception error)
+                {
+                    if (!(error is IOException) && !(error is UnauthorizedAccessException))
+                        throw;
+                    throw new IOException("Restore stopped after restoring " + restored + " item(s). " +
+                        "The unfinished backup is still available. " + error.Message, error);
+                }
             }
 
             try
@@ -545,12 +644,93 @@ namespace ClaudeGuardNative
             var list = new List<string>();
             foreach (string dir in Directory.GetDirectories(quarantineRoot, "desktop-*"))
             {
-                if (!IsReparsePoint(dir) && File.Exists(Path.Combine(dir, "manifest.json")))
-                    list.Add(dir);
+                string manifestPath = Path.Combine(dir, "manifest.json");
+                if (IsReparsePoint(dir) || !File.Exists(manifestPath) || IsReparsePoint(manifestPath) || IsQuarantineActive(dir))
+                    continue;
+                try
+                {
+                    QuarantineManifest manifest = ReadQuarantineManifest(manifestPath);
+                    if (manifest != null && manifest.Version == 2 && manifest.Items != null &&
+                        manifest.Items.Length == 0 && !HasBackupPayload(dir, manifest.PendingItem))
+                        continue;
+                }
+                // Keep unreadable backups visible so the user can see the error on restore.
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+                catch (ArgumentException) { }
+                catch (InvalidOperationException) { }
+                list.Add(dir);
             }
             list.Sort(StringComparer.OrdinalIgnoreCase);
             list.Reverse();
             return list.ToArray();
+        }
+
+        private static bool IsQuarantineActive(string backupDirectory)
+        {
+            try
+            {
+                using (File.Open(Path.Combine(backupDirectory, QuarantineMarker), FileMode.Open, FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete))
+                    return false;
+            }
+            catch (FileNotFoundException) { return false; }
+            catch (DirectoryNotFoundException) { return false; }
+            catch (IOException) { return true; }
+            catch (UnauthorizedAccessException) { return true; }
+        }
+
+        private static string ResolveBackupItemPath(string backupDirectory, string relativePath)
+        {
+            string root = Path.GetFullPath(backupDirectory).TrimEnd('\\') + "\\";
+            string path = Path.GetFullPath(Path.Combine(root, relativePath));
+            if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Manifest path escapes backup directory.");
+            return path;
+        }
+
+        private static bool HasBackupPayload(string backupDirectory, QuarantineItem item)
+        {
+            if (item == null || String.IsNullOrWhiteSpace(item.BackupRelativePath))
+                return false;
+            string path = ResolveBackupItemPath(backupDirectory, item.BackupRelativePath);
+            return File.Exists(path) || Directory.Exists(path);
+        }
+
+        private static QuarantineInterruptedException QuarantineFailure(string backupDirectory, int movedCount,
+            QuarantineItem pendingItem, Exception error)
+        {
+            bool hasBackup = movedCount > 0 || HasBackupPayload(backupDirectory, pendingItem);
+            return new QuarantineInterruptedException(hasBackup ? backupDirectory : "", error);
+        }
+
+        private static QuarantineManifest ReadQuarantineManifest(string path)
+        {
+            return new JavaScriptSerializer().Deserialize<QuarantineManifest>(File.ReadAllText(path, Utf8));
+        }
+
+        private static void WriteQuarantineManifest(string path, QuarantineManifest manifest)
+        {
+            string temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            byte[] contents = Utf8.GetBytes(new JavaScriptSerializer().Serialize(manifest));
+            try
+            {
+                using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    stream.Write(contents, 0, contents.Length);
+                    stream.Flush(true);
+                }
+                if (File.Exists(path))
+                    File.Replace(temporaryPath, path, null);
+                else
+                    File.Move(temporaryPath, path);
+            }
+            finally
+            {
+                try { File.Delete(temporaryPath); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
         }
 
         private static bool IsReparsePoint(string path)
@@ -566,6 +746,13 @@ namespace ClaudeGuardNative
             {
                 return false;
             }
+        }
+
+        private static FileAttributes? GetExistingAttributes(string path)
+        {
+            try { return File.GetAttributes(path); }
+            catch (FileNotFoundException) { return null; }
+            catch (DirectoryNotFoundException) { return null; }
         }
 
         private static long MeasureDirectoryBytes(string dir)
@@ -597,36 +784,95 @@ namespace ClaudeGuardNative
             return total;
         }
 
-        private static void MoveFileOrDirectory(string source, string destination, bool isDir)
+        private static void MoveIntoQuarantine(string source, string destination, bool isDirectory)
         {
-            if (!isDir)
-            {
-                File.Move(source, destination);
+            if (MoveFileEx(source, destination, 0))
                 return;
-            }
+            int error = Marshal.GetLastWin32Error();
+            if (error != ErrorNotSameDevice)
+                throw new IOException("Could not move " + source + " to quarantine. " + new Win32Exception(error).Message);
+
+            string temporaryDirectory = Path.Combine(Path.GetDirectoryName(destination),
+                ".quarantine-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(temporaryDirectory);
             try
             {
-                Directory.Move(source, destination);
+                // Only the completed copy is published at the path recorded in the manifest.
+                string stagedPath = Path.Combine(temporaryDirectory, "item");
+                if (isDirectory)
+                    CopyDirectoryRecursive(source, stagedPath);
+                else
+                    File.Copy(source, stagedPath);
+                if (!MoveFileEx(stagedPath, destination, 0))
+                    throw new IOException("Could not publish the backup. " +
+                        new Win32Exception(Marshal.GetLastWin32Error()).Message);
+                if (isDirectory)
+                    Directory.Delete(source, true);
+                else
+                    File.Delete(source);
             }
-            catch (IOException)
+            finally
             {
-                CopyDirectoryRecursive(source, destination);
-                Directory.Delete(source, true);
+                try { Directory.Delete(temporaryDirectory, true); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
             }
         }
+
+        private static bool TryMoveIntoRestoreDestination(string source, string destination, int restored)
+        {
+            // Zero flags allow neither replacement nor a copy directly into the destination.
+            if (MoveFileEx(source, destination, 0))
+                return true;
+            int error = Marshal.GetLastWin32Error();
+            if (error == ErrorFileExists || error == ErrorAlreadyExists || GetExistingAttributes(destination).HasValue)
+                throw new RestoreConflictException(destination, restored);
+            if (error == ErrorNotSameDevice)
+                return false;
+            throw new IOException("Could not move the backup item to " + destination + ". " + new Win32Exception(error).Message);
+        }
+
+        private static void CopyIntoRestoreDestination(string source, QuarantineItem item, int restored)
+        {
+            string destination = item.OriginalPath;
+            string tempDir = Path.Combine(Path.GetDirectoryName(destination), ".restore-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+            try
+            {
+                // Complete the cross-volume copy on the destination volume before exposing it.
+                string stagedPath = Path.Combine(tempDir, "item");
+                if (item.IsDirectory)
+                    CopyDirectoryRecursive(source, stagedPath);
+                else
+                    File.Copy(source, stagedPath);
+                if (!TryMoveIntoRestoreDestination(stagedPath, destination, restored))
+                    throw new IOException("The restore destination changed volumes: " + destination);
+            }
+            finally
+            {
+                try { Directory.Delete(tempDir, true); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool MoveFileEx(string existingFileName, string newFileName, int flags);
 
         private static void CopyDirectoryRecursive(string sourceDir, string destDir)
         {
             Directory.CreateDirectory(destDir);
             foreach (string file in Directory.GetFiles(sourceDir))
             {
-                if (!IsReparsePoint(file))
-                    File.Copy(file, Path.Combine(destDir, Path.GetFileName(file)), true);
+                if (IsReparsePoint(file))
+                    throw new IOException("Cannot copy a linked item: " + file);
+                File.Copy(file, Path.Combine(destDir, Path.GetFileName(file)));
             }
             foreach (string sub in Directory.GetDirectories(sourceDir))
             {
-                if (!IsReparsePoint(sub))
-                    CopyDirectoryRecursive(sub, Path.Combine(destDir, Path.GetFileName(sub)));
+                if (IsReparsePoint(sub))
+                    throw new IOException("Cannot copy a linked item: " + sub);
+                CopyDirectoryRecursive(sub, Path.Combine(destDir, Path.GetFileName(sub)));
             }
         }
     }

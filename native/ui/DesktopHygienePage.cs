@@ -427,6 +427,18 @@ namespace ClaudeGuardNative
                 RefreshScan();
                 if (HygieneChanged != null) HygieneChanged();
             }
+            catch (QuarantineInterruptedException error)
+            {
+                bool hasBackup = !String.IsNullOrEmpty(error.BackupDirectory);
+                string message = hasBackup
+                    ? UiStrings.T("Quarantine stopped. Items already saved are available in the restore list.",
+                        "隔离已停止。已保存的项目仍可从恢复列表找回。")
+                    : UiStrings.T("Quarantine stopped before any items were saved.", "隔离已停止，尚未保存任何项目。");
+                RefreshScan();
+                if (hasBackup && HygieneChanged != null) HygieneChanged();
+                MessageBox.Show(message + "\n\n" + error.InnerException.Message,
+                    "Claude Guard", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
             catch (Exception error)
             {
                 MessageBox.Show(error.Message, "Claude Guard", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -442,8 +454,8 @@ namespace ClaudeGuardNative
 
             MessageBoxResult confirm = MessageBox.Show(
                 UiStrings.T(
-                    "Restore all quarantined Claude Desktop items from:\n" + item.FullPath + "\n\nClose Claude Desktop first.",
-                    "确定从以下备份还原 Claude Desktop 缓存与会话？\n" + item.FullPath + "\n\n请先确保 Claude Desktop 已关闭。"),
+                    "Restore quarantined Claude Desktop items from this backup?\n" + item.FullPath + "\n\nClose Claude Desktop first. Restore stops if an item already exists.",
+                    "确定从以下备份还原 Claude Desktop 缓存与会话？\n" + item.FullPath + "\n\n请先关闭 Claude Desktop。若目标位置已有同名文件或文件夹，还原会停止。"),
                 "Claude Guard",
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Question,
@@ -461,6 +473,18 @@ namespace ClaudeGuardNative
                     MessageBoxImage.Information);
                 RefreshScan();
                 if (HygieneChanged != null) HygieneChanged();
+            }
+            catch (RestoreConflictException error)
+            {
+                MessageBox.Show(
+                    UiStrings.T(
+                        error.Message + "\n\nMove the existing item to a safe location before retrying.",
+                        "目标位置已有同名文件或文件夹，还原已停止。\n" + error.DestinationPath +
+                        "\n本次已还原 " + error.RestoredCount + " 项。其余内容仍保存在备份中。" +
+                        "\n\n请将现有项目移到安全的位置，再试一次。"),
+                    "Claude Guard", MessageBoxButton.OK, MessageBoxImage.Warning);
+                RefreshScan();
+                if (error.RestoredCount > 0 && HygieneChanged != null) HygieneChanged();
             }
             catch (Exception error)
             {

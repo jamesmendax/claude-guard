@@ -40,6 +40,8 @@ Keep the two executables and `SHA256SUMS.txt` together in the download folder or
 .\ClaudeGuardNativeConsole-2.0.0-x64.exe --stop-claude
 ```
 
+A guarded Desktop or native CLI launch can request administrator approval to repair incomplete firewall coverage for the saved VPN. The guard verifies the rules and reruns the launch checks, including any enabled exit policy, before opening Claude.
+
 ## Optional installation and upkeep
 
 Run from an elevated Windows Terminal under the Windows account that uses Claude (or trigger directly from the GUI **System** tab):
@@ -73,5 +75,16 @@ For live host read-only diagnostics and the manual live-acceptance checklist:
 .\native\Verify-LiveGuard.ps1
 .\native\Verify-LiveGuard.ps1 -CheckExit -ReportPath .\live-check.txt
 ```
+
+### Live Wi-Fi switching test
+
+With Native Guard configured and its saved VPN connected, use an alternate Wi-Fi profile already saved in Windows. Run the preview first, then run the test when a brief interruption is acceptable.
+
+```powershell
+.\native\Test-WifiSwitch.ps1 -AlternateProfile 'Phone Hotspot' -WhatIf
+.\native\Test-WifiSwitch.ps1 -AlternateProfile 'Phone Hotspot'
+```
+
+Use `-AlternateSsid` if the broadcast network name differs from the saved profile name, or `-InterfaceAlias` if more than one Wi-Fi adapter is active. The test switches networks and attempts to reconnect to the original profile even if a check fails. On both networks it checks IPv4 and the default gateway, requests HTTPS through the saved VPN, and reads back the effective firewall rules. The address and gateway together must differ between the two networks. The VPN and Bettbox stay running throughout.
 
 The built executables are unsigned. Source is licensed under [GPL-3.0](../LICENSE).

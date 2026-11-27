@@ -1,11 +1,12 @@
 param(
-    [ValidateSet('Status','StatusCli','Configure','Launch','LaunchCli','Refresh','RemoveRules','StopClaude')][string]$Mode,
+    [ValidateSet('Status','StatusCli','Configure','Repair','Launch','LaunchCli','Refresh','RemoveRules','StopClaude')][string]$Mode,
     [string]$TimeZoneId,
     [string[]]$CliArguments
 )
 
 $ErrorActionPreference = 'Stop'
 $script:GuardRulePrefix = 'ClaudeGuardNative-Block'
+$script:GuardFirewallMutexName = 'Global\ClaudeGuardNativeFirewallSetup'
 $script:GuardSignatureCache = @{}
 $script:GuardShutdownConfirmSeconds = 5
 $script:GuardInventoryRefreshSeconds = 10
@@ -18,6 +19,7 @@ function New-GuardResult([string]$Message = 'Checking local protection.') {
         Ok = $true
         Ready = $false
         CanConfigure = $false
+        CanRepair = $false
         Route = 'Not checked'
         Firewall = 'Not checked'
         Claude = 'Not checked'
@@ -297,7 +299,13 @@ function Get-GuardNativeStatus([switch]$Cli) {
             $answer.Message = 'The VPN changed. Confirm firewall setup for the new route before launching.'
             return $answer
         }
-        Assert-GuardNativeCoverage $state $context
+        try {
+            Assert-GuardNativeCoverage $state $context
+        } catch {
+            $answer.CanRepair = [bool]$state.OwnerSid
+            if ($answer.CanRepair) { $answer.Firewall = 'Repair required' }
+            throw
+        }
         $answer.Firewall = 'Effective blocks verified'
 
         $exitPolicy = Get-GuardExitPolicy
@@ -365,8 +373,9 @@ function Remove-GuardNativeRules([string[]]$Names) {
     if ($rules.Count) { $rules | Remove-NetFirewallRule -ErrorAction Stop }
 }
 
-function Set-GuardNativeProtection([switch]$Refresh) {
-    $mutex = [Threading.Mutex]::new($false, 'Global\ClaudeGuardNativeFirewallSetup')
+function Set-GuardNativeProtection([switch]$Refresh, [switch]$Repair) {
+    $keepVpn = $Refresh -or $Repair
+    $mutex = [Threading.Mutex]::new($false, $script:GuardFirewallMutexName)
     $owned = $false
     try {
         try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
@@ -374,23 +383,25 @@ function Set-GuardNativeProtection([switch]$Refresh) {
         Assert-GuardNoDailyPolicy
         Assert-GuardProfiles
         $previous = Read-GuardNativeState
-        # Setup is an explicit user action. Inspect the current VPN rather than silently preserving a stale selection.
         if ($Refresh -and -not $previous) {
             return (New-GuardResult 'No saved native firewall policy is available to refresh.')
         }
-        if ($Refresh -and -not $previous.OwnerSid) {
+        if ($Repair -and -not $previous) {
+            throw 'Set up the native firewall rules before attempting a repair.'
+        }
+        if ($keepVpn -and -not $previous.OwnerSid) {
             throw 'Run firewall setup once to record the Windows account that owns this policy.'
         }
-        $pin = if ($Refresh) { [string]$previous.VpnGuid } else { '' }
+        $pin = if ($keepVpn) { [string]$previous.VpnGuid } else { '' }
         $context = Get-GuardNativeContext $pin -Setup -AllowVpnDown:$Refresh
         if (@(Get-GuardNativeClientProcesses $context.Inventory).Count) {
             if ($Refresh) { return (New-GuardResult 'Refresh deferred while Claude is running.') }
             throw 'Close Claude before applying native firewall rules.'
         }
-        if ($Refresh) {
+        if ($keepVpn) {
             try {
                 Assert-GuardNativeCoverage $previous $context
-                $answer = New-GuardResult 'Saved rule coverage passed its background check.'
+                $answer = New-GuardResult 'Saved rule coverage is already effective.'
                 $answer.Firewall = 'Effective blocks verified'
                 return $answer
             } catch {
@@ -457,8 +468,9 @@ function Set-GuardNativeProtection([switch]$Refresh) {
         Remove-GuardNativeRules @($previousRules | Where-Object { !$selected.Contains($_) })
         $current = Get-GuardNativeContext ([string]$state.VpnGuid) -Setup -AllowVpnDown:$Refresh
         Assert-GuardNativeCoverage $state $current
-        if ($Refresh) {
-            $answer = New-GuardResult 'Rules refreshed for the saved VPN.'
+        if ($keepVpn) {
+            $message = if ($Repair) { 'Firewall coverage repaired for the saved VPN.' } else { 'Rules refreshed for the saved VPN.' }
+            $answer = New-GuardResult $message
             $answer.Firewall = 'Effective blocks verified'
             return $answer
         }
@@ -494,9 +506,19 @@ function Invoke-GuardNativeDesktop([switch]$Cli, [string]$Zone, [string[]]$Argum
     $state = Read-GuardNativeState
     if (-not $state) { throw 'The native firewall rules need to be set up before launch.' }
     $context = Get-GuardNativeContext ([string]$state.VpnGuid) -Cli:$Cli
-    Assert-GuardNativeCoverage $state $context
     if (@(Get-GuardNativeClientProcesses $context.Inventory).Count) {
         throw 'Close the existing Claude session before opening a guarded one.'
+    }
+    Assert-GuardProfiles
+    try {
+        Assert-GuardNativeCoverage $state $context
+    } catch {
+        if (-not $state.OwnerSid) { throw }
+        $answer = New-GuardResult $_.Exception.Message
+        $answer.Ok = $false
+        $answer.CanRepair = $true
+        $answer.Firewall = 'Repair required'
+        return $answer
     }
     $exitPolicy = Get-GuardExitPolicy
     $localIpv4 = Get-GuardAdapterIpv4 $context.Vpn
@@ -644,6 +666,7 @@ try {
         'Status' { Get-GuardNativeStatus }
         'StatusCli' { Get-GuardNativeStatus -Cli }
         'Configure' { Set-GuardNativeProtection }
+        'Repair' { Set-GuardNativeProtection -Repair }
         'Launch' { Invoke-GuardNativeDesktop -Zone $TimeZoneId }
         'LaunchCli' { Invoke-GuardNativeDesktop -Cli -Zone $TimeZoneId -Arguments $CliArguments }
         'Refresh' { Set-GuardNativeProtection -Refresh }

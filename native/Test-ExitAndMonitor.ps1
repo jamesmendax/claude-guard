@@ -4,11 +4,12 @@ param()
 
 $ErrorActionPreference = 'Stop'
 
-# Compiled Native Guard assemblies target Windows inbox .NET Framework 4.8 (including System.Web.Extensions).
-# When invoked from PowerShell 7 (.NET Core), delegate transparently to Windows PowerShell 5.1.
+# The compiled Guard uses .NET Framework types that PowerShell 7 cannot load.
 if ($PSVersionTable.PSEdition -ne 'Desktop') {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath
-    exit $LASTEXITCODE
+    $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    & $windowsPowerShell -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File $PSCommandPath
+    if ($LASTEXITCODE -ne 0) { throw "The Windows PowerShell tests exited with code $LASTEXITCODE." }
+    return
 }
 
 $script:Checks = 0
@@ -230,6 +231,55 @@ try {
         [IO.File]::Exists((Join-Path $qRes.BackupDirectory 'manifest.json'))
     ) 'DesktopHygiene quarantines cache/cookies/logs while leaving claude_desktop_config.json completely untouched.'
 
+    $manifestPath = Join-Path $qRes.BackupDirectory 'manifest.json'
+    $manifestJson = [IO.File]::ReadAllText($manifestPath)
+    $manifest = ConvertFrom-Json $manifestJson
+    $liveCache = Join-Path $classicClaude 'Cache'
+    $liveCookies = Join-Path $classicClaude 'Cookies'
+    $backupCache = Join-Path $qRes.BackupDirectory (($manifest.Items | Where-Object OriginalPath -eq $liveCache).BackupRelativePath)
+    $backupCookies = Join-Path $qRes.BackupDirectory (($manifest.Items | Where-Object OriginalPath -eq $liveCookies).BackupRelativePath)
+
+    [IO.File]::WriteAllText($liveCookies, 'new-cookie-data')
+    Assert-Throws { [ClaudeGuardNative.DesktopHygiene]::Restore($qRes.BackupDirectory) } 'destination already exists'
+    Assert-Case (
+        [IO.File]::ReadAllText($liveCookies) -ceq 'new-cookie-data' -and
+        [IO.File]::ReadAllText($backupCookies) -ceq 'cookie-data' -and
+        [IO.File]::ReadAllText($manifestPath) -ceq $manifestJson -and
+        [IO.File]::ReadAllText((Join-Path $backupCache 'blob.bin')) -ceq 'cached-bytes' -and
+        -not [IO.Directory]::Exists($liveCache)
+    ) 'A file conflict preserves current data, all backup items, and the manifest before any item is restored.'
+    [IO.File]::Move($liveCookies, (Join-Path $hygieneRoot 'new-cookies'))
+
+    $null = [IO.Directory]::CreateDirectory($liveCache)
+    $newCacheFile = Join-Path $liveCache 'blob.bin'
+    [IO.File]::WriteAllText($newCacheFile, 'new-cache-data')
+    Assert-Throws { [ClaudeGuardNative.DesktopHygiene]::Restore($qRes.BackupDirectory) } 'destination already exists'
+    Assert-Case (
+        [IO.File]::ReadAllText($newCacheFile) -ceq 'new-cache-data' -and
+        [IO.File]::ReadAllText((Join-Path $backupCache 'blob.bin')) -ceq 'cached-bytes'
+    ) 'A directory conflict preserves the current and backed-up directory contents.'
+    [IO.Directory]::Move($liveCache, (Join-Path $hygieneRoot 'new-cache'))
+
+    [IO.File]::WriteAllText($liveCache, 'file-at-cache-path')
+    Assert-Throws { [ClaudeGuardNative.DesktopHygiene]::Restore($qRes.BackupDirectory) } 'destination already exists'
+    Assert-Case ([IO.File]::ReadAllText($liveCache) -ceq 'file-at-cache-path') 'A file also blocks a restored directory at the same path.'
+    [IO.File]::Move($liveCache, (Join-Path $hygieneRoot 'new-cache-file'))
+
+    $null = [IO.Directory]::CreateDirectory($liveCookies)
+    Assert-Throws { [ClaudeGuardNative.DesktopHygiene]::Restore($qRes.BackupDirectory) } 'destination already exists'
+    Assert-Case ([IO.Directory]::Exists($liveCookies)) 'A directory also blocks a restored file at the same path.'
+    [IO.Directory]::Move($liveCookies, (Join-Path $hygieneRoot 'new-cookie-directory'))
+
+    $missingCookies = Join-Path $hygieneRoot 'missing-backup-cookies'
+    [IO.File]::Move($backupCookies, $missingCookies)
+    Assert-Throws { [ClaudeGuardNative.DesktopHygiene]::Restore($qRes.BackupDirectory) } 'missing from both the backup and its expected destination'
+    Assert-Case (
+        [IO.File]::ReadAllText($manifestPath) -ceq $manifestJson -and
+        [IO.File]::ReadAllText((Join-Path $backupCache 'blob.bin')) -ceq 'cached-bytes' -and
+        -not [IO.Directory]::Exists($liveCache)
+    ) 'A missing backup item stops restoration and retains the remaining backup.'
+    [IO.File]::Move($missingCookies, $backupCookies)
+
     $restoredCount = [ClaudeGuardNative.DesktopHygiene]::Restore($qRes.BackupDirectory)
     Assert-Case (
         $restoredCount -eq 4 -and
@@ -238,6 +288,94 @@ try {
         [IO.File]::Exists((Join-Path $storeClaude 'Network\Cookies')) -and
         -not [IO.Directory]::Exists($qRes.BackupDirectory)
     ) 'DesktopHygiene restores all quarantined items cleanly and removes the consumed backup directory.'
+
+    $qRes = [ClaudeGuardNative.DesktopHygiene]::Quarantine($scan1, $qRoot)
+    $backupCookies = Join-Path $qRes.BackupDirectory (($manifest.Items | Where-Object OriginalPath -eq $liveCookies).BackupRelativePath)
+    $lockedFile = [IO.File]::Open($backupCookies, 'Open', 'Read', 'None')
+    try {
+        Assert-Throws { [ClaudeGuardNative.DesktopHygiene]::Restore($qRes.BackupDirectory) } 'after restoring 1 item'
+    } finally {
+        $lockedFile.Dispose()
+    }
+    Assert-Case (
+        [IO.File]::ReadAllText((Join-Path $liveCache 'blob.bin')) -ceq 'cached-bytes' -and
+        [IO.File]::ReadAllText($backupCookies) -ceq 'cookie-data' -and
+        [IO.File]::Exists((Join-Path $qRes.BackupDirectory 'manifest.json'))
+    ) 'A restore failure leaves completed items in place and retains the remaining backup.'
+    Assert-Case (
+        [ClaudeGuardNative.DesktopHygiene]::Restore($qRes.BackupDirectory) -eq 3 -and
+        [IO.File]::ReadAllText($liveCookies) -ceq 'cookie-data' -and
+        -not [IO.Directory]::Exists($qRes.BackupDirectory)
+    ) 'Retry restores only the remaining items and consumes the completed backup.'
+
+    $partialClaude = Join-Path $hygieneRoot 'PartialQuarantine\Claude'
+    $partialQuarantineRoot = Join-Path $hygieneRoot 'PartialQuarantine\Backups'
+    $partialCache = Join-Path $partialClaude 'Cache'
+    $partialCacheFile = Join-Path $partialCache 'blob.bin'
+    $partialCookies = Join-Path $partialClaude 'Cookies'
+    $partialMcpConfig = Join-Path $partialClaude 'claude_desktop_config.json'
+    $partialMcpJson = '{"mcpServers":{"partial":{}}}'
+    $null = [IO.Directory]::CreateDirectory($partialClaude)
+    [IO.File]::WriteAllText($partialCookies, 'locked-cookie-data')
+    [IO.File]::WriteAllText($partialMcpConfig, $partialMcpJson)
+
+    $partialScan = [ClaudeGuardNative.DesktopHygiene]::Scan($partialClaude, [string[]]@(), $fakeStartup, $partialQuarantineRoot)
+    $lockedFile = [IO.File]::Open($partialCookies, 'Open', 'Read', 'None')
+    try {
+        Assert-Throws { [ClaudeGuardNative.DesktopHygiene]::Quarantine($partialScan, $partialQuarantineRoot) } 'Quarantine stopped'
+    } finally {
+        $lockedFile.Dispose()
+    }
+    $partialScan = [ClaudeGuardNative.DesktopHygiene]::Scan($partialClaude, [string[]]@(), $fakeStartup, $partialQuarantineRoot)
+    Assert-Case ($partialScan.Backups.Count -eq 0) 'A failure on the first quarantine item leaves no listed backup.'
+
+    $null = [IO.Directory]::CreateDirectory($partialCache)
+    [IO.File]::WriteAllText($partialCacheFile, 'partial-cache-data')
+    $partialScan = [ClaudeGuardNative.DesktopHygiene]::Scan($partialClaude, [string[]]@(), $fakeStartup, $partialQuarantineRoot)
+    $lockedFile = [IO.File]::Open($partialCookies, 'Open', 'Read', 'None')
+    try {
+        Assert-Throws { [ClaudeGuardNative.DesktopHygiene]::Quarantine($partialScan, $partialQuarantineRoot) } 'Quarantine stopped'
+    } finally {
+        $lockedFile.Dispose()
+    }
+    Assert-Case (-not [IO.Directory]::Exists($partialCache)) 'Quarantine moves Cache before failing on the locked Cookies file.'
+
+    $partialScan = [ClaudeGuardNative.DesktopHygiene]::Scan($partialClaude, [string[]]@(), $fakeStartup, $partialQuarantineRoot)
+    Assert-Case ($partialScan.Backups.Count -eq 1) 'A fresh scan lists the backup from the interrupted quarantine.'
+    Assert-Case (
+        [ClaudeGuardNative.DesktopHygiene]::Restore($partialScan.Backups[0]) -eq 1 -and
+        [IO.File]::ReadAllText($partialCacheFile) -ceq 'partial-cache-data' -and
+        [IO.File]::ReadAllText($partialCookies) -ceq 'locked-cookie-data' -and
+        [IO.File]::ReadAllText($partialMcpConfig) -ceq $partialMcpJson
+    ) 'Restoring the listed backup recovers Cache and preserves Cookies and MCP configuration.'
+
+    # Model an interruption after a payload was published but before the manifest was finalized.
+    $interruptedBackup = Join-Path $partialQuarantineRoot 'desktop-interrupted-fixture'
+    $interruptedCache = Join-Path $hygieneRoot 'Interrupted\Claude\Cache'
+    $publishedCache = Join-Path $interruptedBackup 'Classic-1\Cache'
+    $null = [IO.Directory]::CreateDirectory($publishedCache)
+    [IO.File]::WriteAllText((Join-Path $publishedCache 'blob.bin'), 'published-cache-data')
+    $interruptedManifest = @{
+        Version = 2
+        Items = @()
+        PendingItem = @{ OriginalPath = $interruptedCache; BackupRelativePath = 'Classic-1\Cache'; IsDirectory = $true }
+    } | ConvertTo-Json -Depth 4 -Compress
+    [IO.File]::WriteAllText((Join-Path $interruptedBackup 'manifest.json'), $interruptedManifest)
+    $marker = [IO.FileStream]::new((Join-Path $interruptedBackup '.quarantine-in-progress'),
+        [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 4096, [IO.FileOptions]::DeleteOnClose)
+    try {
+        $activeScan = [ClaudeGuardNative.DesktopHygiene]::Scan($partialClaude, [string[]]@(), $fakeStartup, $partialQuarantineRoot)
+        Assert-Case ($activeScan.Backups.Count -eq 0) 'An active quarantine is excluded from the restore list.'
+        Assert-Throws { [ClaudeGuardNative.DesktopHygiene]::Restore($interruptedBackup) } 'Quarantine is still running'
+    } finally {
+        $marker.Dispose()
+    }
+    $interruptedScan = [ClaudeGuardNative.DesktopHygiene]::Scan($partialClaude, [string[]]@(), $fakeStartup, $partialQuarantineRoot)
+    Assert-Case (
+        $interruptedScan.Backups.Count -eq 1 -and
+        [ClaudeGuardNative.DesktopHygiene]::Restore($interruptedScan.Backups[0]) -eq 1 -and
+        [IO.File]::ReadAllText((Join-Path $interruptedCache 'blob.bin')) -ceq 'published-cache-data'
+    ) 'An interrupted manifest recovers a published payload even before finalization.'
 
     $createdLnk = [ClaudeGuardNative.DesktopHygiene]::CreateGuardedShortcut($consoleExe, $shortcutOut)
     Assert-Case ([IO.File]::Exists($createdLnk) -and (Get-Item -LiteralPath $createdLnk).Length -gt 0) 'CreateGuardedShortcut creates a valid Windows .lnk shortcut.'
