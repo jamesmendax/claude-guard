@@ -14,8 +14,8 @@ using System.Windows.Forms;
 [assembly: AssemblyTitle("Claude Guard Native")]
 [assembly: AssemblyProduct("Claude Guard Native")]
 [assembly: AssemblyDescription("Local Windows VPN and firewall launch guard")]
-[assembly: AssemblyVersion("2.0.1.0")]
-[assembly: AssemblyFileVersion("2.0.1.0")]
+[assembly: AssemblyVersion("2.0.2.0")]
+[assembly: AssemblyFileVersion("2.0.2.0")]
 
 namespace ClaudeGuardNative
 {
@@ -68,7 +68,7 @@ namespace ClaudeGuardNative
 
     internal static class GuardEngine
     {
-        internal const string VersionText = "2.0.1";
+        internal const string VersionText = "2.0.2";
 
         internal static string ReadResource(string name)
         {

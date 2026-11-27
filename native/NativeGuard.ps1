@@ -226,8 +226,14 @@ function Get-GuardNativeContext([string]$Pin, $Status, [switch]$Cli, [switch]$Se
     [pscustomobject]@{ Vpn = $vpn; Adapters = $adapters; Inventory = $inventory; Desktop = $desktop; Rules = $specifications }
 }
 
-function Get-GuardNativeFingerprint($Context) {
+function Get-GuardNativeFingerprint($Context, [switch]$ForSession) {
     $parts = @([string]$Context.Vpn.InterfaceGuid, [string]$Context.Desktop.Path, [string]$Context.Desktop.AppId)
+    if ($ForSession) {
+        # The current route and firewall checks determine whether adapter changes are safe.
+        $parts += @($Context.Inventory.Programs | Sort-Object)
+        $parts += @($Context.Inventory.Packages | ForEach-Object Sid | Sort-Object)
+        return $parts -join [Environment]::NewLine
+    }
     $parts += @($Context.Adapters | ForEach-Object {
         '{0}|{1}|{2}|{3}' -f $_.InterfaceGuid, $_.Name, $_.Status, $_.Ipv4Present
     } | Sort-Object)
@@ -528,7 +534,7 @@ function Invoke-GuardNativeDesktop([switch]$Cli, [string]$Zone, [string[]]$Argum
             throw ([string]$preExit.Message)
         }
     }
-    $snapshot = Get-GuardNativeFingerprint $context
+    $snapshot = Get-GuardNativeFingerprint $context -ForSession
     $started = $null
     $startedIdentity = $null
     $watcher = $null
@@ -536,10 +542,10 @@ function Invoke-GuardNativeDesktop([switch]$Cli, [string]$Zone, [string[]]$Argum
     try {
         Start-GuardSessionZone $Zone
         $beforeLaunch = Get-GuardNativeContext ([string]$state.VpnGuid) -Cli:$Cli
-        if ((Get-GuardNativeFingerprint $beforeLaunch) -cne $snapshot) {
-            throw 'The route, adapter inventory or Claude installation changed before launch.'
-        }
         Assert-GuardNativeCoverage $state $beforeLaunch
+        if ((Get-GuardNativeFingerprint $beforeLaunch -ForSession) -cne $snapshot) {
+            throw 'The verified VPN or Claude application inventory changed before launch.'
+        }
         $watcher = New-GuardNetworkWatcher
         if ($Cli) {
             $started = Start-GuardNativeCli $context.Desktop.Path $Arguments
@@ -576,10 +582,10 @@ function Invoke-GuardNativeDesktop([switch]$Cli, [string]$Zone, [string[]]$Argum
             } else {
                 $current = Get-GuardNativeContext ([string]$state.VpnGuid) -Cli:$Cli -CachedInventory $context.Inventory
             }
-            if ((Get-GuardNativeFingerprint $current) -cne $snapshot) {
-                throw 'The route, adapter inventory or Claude installation changed during this session.'
-            }
             Assert-GuardNativeCoverage $state $current
+            if ((Get-GuardNativeFingerprint $current -ForSession) -cne $snapshot) {
+                throw 'The verified VPN or Claude application inventory changed during this session.'
+            }
             if ($exitPolicy -and $exitPolicy.Enabled) {
                 $interval = if ($exitPolicy.MonitorIntervalSeconds -ge 15) { [int]$exitPolicy.MonitorIntervalSeconds } else { 45 }
                 if ($wokeByEvent -or ($exitClock.Elapsed.TotalSeconds -ge $interval)) {

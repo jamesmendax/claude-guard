@@ -47,6 +47,8 @@ function Reset-Fixture {
     $script:ExitChecks = 0
     $script:FailSecondCreate = $false
     $script:FailDuringSession = $false
+    $script:ChangeAdapterMetadataDuringSession = $false
+    $script:FixtureAdapterStatus = 'Up'
     $script:FailExitDuringSession = $false
     $script:ProxyPresent = $false
     $script:ProxyIssueKind = 'AutoDetect'
@@ -133,7 +135,20 @@ function Get-GuardPinnedVpnAdapter([string]$Pin) {
 }
 
 function Get-GuardBlockedAdapters($Vpn, [switch]$AllowVpnDown) {
-    [pscustomobject]@{ InterfaceGuid = $script:AdapterId; Name = 'Fixture Ethernet'; Status = 'Up'; Ipv4Present = $true }
+    [pscustomobject]@{
+        InterfaceGuid = $script:AdapterId
+        Name = 'Fixture Ethernet'
+        Status = $script:FixtureAdapterStatus
+        Ipv4Present = $true
+    }
+    if ($script:FixtureAdapterStatus -eq 'Disconnected') {
+        [pscustomobject]@{
+            InterfaceGuid = 'e7385631-d368-4eab-a932-d9cf25cc5696'
+            Name = 'Fixture IPv6 Adapter'
+            Status = 'Up'
+            Ipv4Present = $false
+        }
+    }
 }
 
 function Get-GuardInventory {
@@ -217,7 +232,15 @@ function Start-Sleep {
     param([int]$Milliseconds)
     $script:SleepCount++
     if ($script:FailDuringSession) {
-        if ($script:SleepCount -gt 1) {
+        $lossTick = 1
+        if ($script:ChangeAdapterMetadataDuringSession) {
+            if ($script:SleepCount -eq 1) {
+                $script:FixtureAdapterStatus = 'Disconnected'
+                return
+            }
+            $lossTick = 2
+        }
+        if ($script:SleepCount -gt $lossTick) {
             throw 'Fixture monitor did not stop on the missing rule.'
         }
         $script:Rules.Remove($script:OldRule)
@@ -345,6 +368,15 @@ Reset-Fixture
 $script:FailDuringSession = $true
 Assert-Throws { Invoke-GuardNativeDesktop } 'effective rule missing'
 Assert-Check ($script:Started -and $script:SleepCount -eq 1 -and $script:StopRequested) 'Losing a verified rule during a session requests shutdown.'
+
+Reset-Fixture
+$script:FailDuringSession = $true
+$script:ChangeAdapterMetadataDuringSession = $true
+$script:SimulateEventWake = $true
+Assert-Throws { Invoke-GuardNativeDesktop } 'effective rule missing'
+Assert-Check (
+    $script:Started -and $script:SleepCount -eq 2 -and $script:StopRequested
+) 'A covered adapter disconnect and a new IPv6-only interface keep the session running until firewall coverage actually fails.'
 
 Reset-Fixture
 $script:FailSecondCreate = $true

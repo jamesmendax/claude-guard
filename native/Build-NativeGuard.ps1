@@ -3,7 +3,7 @@
 param()
 
 $ErrorActionPreference = 'Stop'
-$version = '2.0.1'
+$version = '2.0.2'
 $buildFolder = Join-Path $PSScriptRoot '.build'
 $corePath = Join-Path $buildFolder 'NetworkCore.ps1'
 $coreFiles = @(

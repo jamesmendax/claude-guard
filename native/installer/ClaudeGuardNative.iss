@@ -1,4 +1,4 @@
-; Optional Inno Setup script for Claude Guard Native 2.0.1 (Windows x64)
+; Optional Inno Setup script for Claude Guard Native 2.0.2 (Windows x64)
 ; Build prerequisites:
 ;   1. Run .\native\Build-NativeGuard.ps1 to generate native\.build\*.exe and SHA256SUMS.txt
 ;   2. Compile with Inno Setup 6: iscc native\installer\ClaudeGuardNative.iss
@@ -6,7 +6,7 @@
 ; Note: Unsigned builds may trigger Windows SmartScreen or Smart App Control in Enforcement mode.
 
 #define MyAppName "Claude Guard Native"
-#define MyAppVersion "2.0.1"
+#define MyAppVersion "2.0.2"
 #define MyAppPublisher "Claude Guard Contributors"
 #define MyAppURL "https://github.com/jamesmendax/claude-guard"
 #define MyAppExeName "ClaudeGuardNative.exe"

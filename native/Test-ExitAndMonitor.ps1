@@ -34,7 +34,7 @@ function Assert-Throws([scriptblock]$Action, [string]$Expected) {
 }
 
 $buildDir = Join-Path $PSScriptRoot '.build'
-$consoleExe = Join-Path $buildDir 'ClaudeGuardNativeConsole-2.0.1-x64.exe'
+$consoleExe = Join-Path $buildDir 'ClaudeGuardNativeConsole-2.0.2-x64.exe'
 if (-not (Test-Path -LiteralPath $consoleExe -PathType Leaf)) {
     throw "Build Native Guard first with ./native/Build-NativeGuard.ps1 (missing $consoleExe)."
 }

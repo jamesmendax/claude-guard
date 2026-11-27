@@ -19,7 +19,7 @@
 - **Granular Proxy / WPAD Diagnostics**: Distinguishes process proxy environment variables, Windows manual proxy, PAC scripts, Windows WPAD (`Automatically detect settings`), and WinHTTP proxy, with an inline repair prompt and one-click link to Windows Proxy Settings.
 - **Bilingual UI (English / 简体中文) & Full Console Companion**: Live segmented `中 | EN` language switcher, Windows region/input tool (`--region`), session time-zone rollback, encrypted DNS (DoH) controls, SHA-256 package verification (`--verify-package`), and masked diagnostic report export.
 
-👉 **[Native Guard 2.0.1 documentation, CLI reference, build & verification steps](native/README.md)** · **[Known limitations](native/LIMITATIONS.md)** · **[Releases](https://github.com/jamesmendax/claude-guard/releases)**
+👉 **[Native Guard 2.0.2 documentation, CLI reference, build & verification steps](native/README.md)** · **[Known limitations](native/LIMITATIONS.md)** · **[Releases](https://github.com/jamesmendax/claude-guard/releases)**
 
 ### Quick build and offline verification (Windows x64)
 
@@ -43,12 +43,12 @@ For read-only live host diagnostics and the manual live-acceptance checklist:
 
 The directories `package/`, `release/`, `runtime/`, `tests/`, and `tools/` preserve the original public source components and test fixtures for the earlier **Claude Guard 1.0.4** Bettbox/WFP/AppContainer architecture.
 
-- Because the complete 1.0.4 installer depended on eight inherited scripts from `gruskry/claude-vpn-guard` (whose pinned revision lacks a published redistribution license), those omitted scripts and the full 1.0.4 installer remain private. Building the full 1.0.4 installer from this public checkout is **not** supported; use **Native Guard 2.0.1** in [`native/`](native/) for a complete, self-contained public build.
+- Because the complete 1.0.4 installer depended on eight inherited scripts from `gruskry/claude-vpn-guard` (whose pinned revision lacks a published redistribution license), those omitted scripts and the full 1.0.4 installer remain private. Building the full 1.0.4 installer from this public checkout is **not** supported; use **Native Guard 2.0.2** in [`native/`](native/) for a complete, self-contained public build.
 - See [Third-party notices](NOTICE.md), [1.0.4 checksums](checksums/ClaudeGuardSetup-1.0.4-SHA256.txt), and [legacy test instructions](tests/README.md).
 
 ## Repository layout
 
-- `native/` — **Active mainline**: complete source (`ui/`, `assets/`, `ExitProbe.cs`, `NetworkMonitor.cs`, `DesktopHygiene.cs`), 135 offline tests, live verification helper, Inno Setup script, and limitations doc for **Native Guard 2.0.1**.
+- `native/` — **Active mainline**: complete source (`ui/`, `assets/`, `ExitProbe.cs`, `NetworkMonitor.cs`, `DesktopHygiene.cs`), 136 offline tests, live verification helper, Inno Setup script, and limitations doc for **Native Guard 2.0.2**.
 - `.github/workflows/native-guard-ci.yml` — Automated Windows CI building and testing Native Guard under both Windows PowerShell 5.1 and PowerShell 7.
 - `package/`, `release/`, `runtime/`, `tests/`, `tools/` — Historical 1.0.4 Bettbox/WFP public source snapshot and fixtures.
 

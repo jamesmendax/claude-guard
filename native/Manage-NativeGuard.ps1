@@ -11,7 +11,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$version = '2.0.1'
+$version = '2.0.2'
 $taskName = 'Claude Guard Native Refresh'
 $taskPath = '\'
 $files = [ordered]@{

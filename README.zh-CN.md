@@ -19,7 +19,7 @@
 - **精细化代理 / WPAD 冲突诊断**：明确区分进程环境变量、Windows 手动代理、PAC 脚本、WPAD 自动检测与 WinHTTP 代理，拦截时内联给出修复指引并直达 Windows 代理设置页。
 - **实时中英双语切换与完整命令行套件**：侧栏底部一键切换 `中 | EN`，内置区域/输入法工具（`--region`）、会话临时时区自动恢复、加密 DNS（DoH）、安装包 SHA-256 校验（`--verify-package`）与脱敏诊断报告导出。
 
-👉 **[Native Guard 2.0.1 详细说明、命令行与构建指南](native/README.md)** · **[已知边界与限制](native/LIMITATIONS.md)** · **[发布页 (Releases)](https://github.com/jamesmendax/claude-guard/releases)**
+👉 **[Native Guard 2.0.2 详细说明、命令行与构建指南](native/README.md)** · **[已知边界与限制](native/LIMITATIONS.md)** · **[发布页 (Releases)](https://github.com/jamesmendax/claude-guard/releases)**
 
 ### 快速构建与离线测试（Windows x64）
 
@@ -50,12 +50,12 @@ iscc .\native\installer\ClaudeGuardNative.iss
 仓库中的 `package/`、`release/`、`runtime/`、`tests/` 与 `tools/` 目录保留了早期 **Claude Guard 1.0.4** 的原创源码与测试夹具。
 
 - 由于 1.0.4 完整安装包曾依赖 `gruskry/claude-vpn-guard` 的 8 个历史脚本（其锁定版本未附带再分发许可证），这些脚本和完整 1.0.4 安装包未纳入公开仓库，因此**不能从本公开仓库直接构建 1.0.4 完整安装包**。
-- 如需可直接从公开源码完整构建并运行的成品，请使用 [`native/`](native/) 目录下的 **Native Guard 2.0.1**。
+- 如需可直接从公开源码完整构建并运行的成品，请使用 [`native/`](native/) 目录下的 **Native Guard 2.0.2**。
 - 第三方声明见 [NOTICE.md](NOTICE.md)，历史校验和见 [checksums/](checksums/)。
 
 ## 仓库目录结构
 
-- `native/` — **当前活跃主线**：Native Guard 2.0.1 完整源码（含 `ui/` 原生 WPF 模块与 `assets/` 矢量图标）、135 项离线测试套件、只读实机验收脚本、Inno Setup 脚本与已知边界文档。
+- `native/` — **当前活跃主线**：Native Guard 2.0.2 完整源码（含 `ui/` 原生 WPF 模块与 `assets/` 矢量图标）、136 项离线测试套件、只读实机验收脚本、Inno Setup 脚本与已知边界文档。
 - `.github/workflows/native-guard-ci.yml` — Windows 自动化 CI，覆盖 Windows PowerShell 5.1 与 PowerShell 7 构建和全部离线测试。
 - `package/`、`release/`、`runtime/`、`tests/`、`tools/` — 历史 1.0.4 Bettbox/WFP 公开源码归档与测试夹具。
 
