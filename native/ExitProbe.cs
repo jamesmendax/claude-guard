@@ -538,7 +538,7 @@ namespace ClaudeGuardNative
 
                         string request = "GET /cdn-cgi/trace HTTP/1.1\r\n" +
                             "Host: " + targetHost + "\r\n" +
-                            "User-Agent: ClaudeGuardNative/2.0.0\r\n" +
+                            "User-Agent: ClaudeGuardNative/2.0.1\r\n" +
                             "Accept: text/plain\r\n" +
                             "Connection: close\r\n\r\n";
                         byte[] payload = Encoding.ASCII.GetBytes(request);

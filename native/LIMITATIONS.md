@@ -1,4 +1,4 @@
-# Known Limitations and Scope Boundaries (Native Guard 2.0.0)
+# Known Limitations and Scope Boundaries (Native Guard 2.0.1)
 
 This document records what **Claude Guard Native** verifies, what it does **not** cover, and which scenarios require live testing on your own Windows environment.
 

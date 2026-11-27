@@ -1,8 +1,10 @@
-# Claude Guard Native 2.0.0
+# Claude Guard Native 2.0.1
 
-This folder contains the complete source for Windows x64 **Native Guard 2.0.0**. A local build produces a native WPF graphical app (`ClaudeGuardNative-2.0.0-x64.exe`, ~313 KB) and a console executable (`ClaudeGuardNativeConsole-2.0.0-x64.exe`) using only Windows inbox tools — zero external SDKs or runtimes required.
+This folder contains the complete source for Windows x64 **Native Guard 2.0.1**. A local build produces a native WPF graphical app (`ClaudeGuardNative-2.0.1-x64.exe`) and a console executable (`ClaudeGuardNativeConsole-2.0.1-x64.exe`) using only Windows inbox tools — zero external SDKs or runtimes required.
 
 > Read [LIMITATIONS.md](LIMITATIONS.md) for scope boundaries, policy caveats, and the distinction between offline-verified checks and live-environment verification.
+
+Version 2.0.1 prevents tray exit from interrupting an active guard, preserves newer files during restore, makes partial quarantine backups recoverable, adds saved-VPN firewall repair, and includes the Wi-Fi switch test.
 
 ## What's new in 2.0.0
 
@@ -22,22 +24,22 @@ This folder contains the complete source for Windows x64 **Native Guard 2.0.0**.
 | **Desktop Hygiene (`桌面卫生`)** | Scan Classic & Store MSIX Claude Desktop folders, inspect Windows auto-start race risks, archive old cache/cookies/logs with strict `claude_desktop_config.json` (MCP) protection, 1-click restore from timestamped backups, and fingerprint-browser OAuth login tip. |
 | **System (`系统与维护`)** | Apply/refresh or remove Windows Firewall rules, create a guarded Desktop shortcut (`--launch-desktop`), install/disable the 5-minute background refresh task, configure optional temporary session time zone, open Windows Region/Input (`--region`) and Encrypted DNS (DoH) tools, verify SHA-256 checksums, open logs, export masked diagnostics, or uninstall. |
 
-The standalone region and input window also launches directly with `ClaudeGuardNative-2.0.0-x64.exe --region`, and guarded Desktop auto-launch works via `ClaudeGuardNative-2.0.0-x64.exe --launch-desktop`.
+The standalone region and input window also launches directly with `ClaudeGuardNative-2.0.1-x64.exe --region`, and guarded Desktop auto-launch works via `ClaudeGuardNative-2.0.1-x64.exe --launch-desktop`.
 
 ## Portable and console use
 
-Keep the two executables and `SHA256SUMS.txt` together in the download folder or `native/.build/`. Double-click `ClaudeGuardNative-2.0.0-x64.exe` for the main window, or use the console:
+Keep the two executables and `SHA256SUMS.txt` together in the download folder or `native/.build/`. Double-click `ClaudeGuardNative-2.0.1-x64.exe` for the main window, or use the console:
 
 ```powershell
-.\ClaudeGuardNativeConsole-2.0.0-x64.exe --verify-package
-.\ClaudeGuardNativeConsole-2.0.0-x64.exe --status
-.\ClaudeGuardNativeConsole-2.0.0-x64.exe --status --cli
-.\ClaudeGuardNativeConsole-2.0.0-x64.exe --check-exit
-.\ClaudeGuardNativeConsole-2.0.0-x64.exe --check-exit --host claude.ai --allow-country US,JP
-.\ClaudeGuardNativeConsole-2.0.0-x64.exe --desktop
-.\ClaudeGuardNativeConsole-2.0.0-x64.exe --cli
-.\ClaudeGuardNativeConsole-2.0.0-x64.exe --cli --time-zone "Tokyo Standard Time" -- --help
-.\ClaudeGuardNativeConsole-2.0.0-x64.exe --stop-claude
+.\ClaudeGuardNativeConsole-2.0.1-x64.exe --verify-package
+.\ClaudeGuardNativeConsole-2.0.1-x64.exe --status
+.\ClaudeGuardNativeConsole-2.0.1-x64.exe --status --cli
+.\ClaudeGuardNativeConsole-2.0.1-x64.exe --check-exit
+.\ClaudeGuardNativeConsole-2.0.1-x64.exe --check-exit --host claude.ai --allow-country US,JP
+.\ClaudeGuardNativeConsole-2.0.1-x64.exe --desktop
+.\ClaudeGuardNativeConsole-2.0.1-x64.exe --cli
+.\ClaudeGuardNativeConsole-2.0.1-x64.exe --cli --time-zone "Tokyo Standard Time" -- --help
+.\ClaudeGuardNativeConsole-2.0.1-x64.exe --stop-claude
 ```
 
 A guarded Desktop or native CLI launch can request administrator approval to repair incomplete firewall coverage for the saved VPN. The guard verifies the rules and reruns the launch checks, including any enabled exit policy, before opening Claude.
@@ -47,15 +49,15 @@ A guarded Desktop or native CLI launch can request administrator approval to rep
 Run from an elevated Windows Terminal under the Windows account that uses Claude (or trigger directly from the GUI **System** tab):
 
 ```powershell
-.\ClaudeGuardNativeConsole-2.0.0-x64.exe --install
-.\ClaudeGuardNativeConsole-2.0.0-x64.exe --install --enable-refresh
-.\ClaudeGuardNativeConsole-2.0.0-x64.exe --disable-refresh
-.\ClaudeGuardNativeConsole-2.0.0-x64.exe --remove-rules
-.\ClaudeGuardNativeConsole-2.0.0-x64.exe --uninstall
-.\ClaudeGuardNativeConsole-2.0.0-x64.exe --uninstall --remove-rules
+.\ClaudeGuardNativeConsole-2.0.1-x64.exe --install
+.\ClaudeGuardNativeConsole-2.0.1-x64.exe --install --enable-refresh
+.\ClaudeGuardNativeConsole-2.0.1-x64.exe --disable-refresh
+.\ClaudeGuardNativeConsole-2.0.1-x64.exe --remove-rules
+.\ClaudeGuardNativeConsole-2.0.1-x64.exe --uninstall
+.\ClaudeGuardNativeConsole-2.0.1-x64.exe --uninstall --remove-rules
 ```
 
-Installed files live in `%ProgramFiles%\Claude Guard Native\2.0.0` with administrator-only write ACLs.
+Installed files live in `%ProgramFiles%\Claude Guard Native\2.0.1` with administrator-only write ACLs.
 
 ## Build and verification
 
